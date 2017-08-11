@@ -531,13 +531,9 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     /* Calculate recording parameters */
 
+    uint32_t numberOfSamplesInHeader = sizeof(wavHeader) >> 1;
+
     uint32_t numberOfSamples = configSettings->sampleRate * recordDuration;
-
-    /* Initialise the WAV header */
-
-    setHeaderDetails(configSettings->sampleRate, numberOfSamples);
-
-    setHeaderComment(currentTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain);
 
     /* Initialise microphone for recording */
 
@@ -567,9 +563,9 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     uint32_t readBuffer = writeBuffer;
 
-    while (samplesWritten < numberOfSamples && !recordingCancelled) {
+    while (samplesWritten < numberOfSamples + numberOfSamplesInHeader && !recordingCancelled) {
 
-        while (readBuffer != writeBuffer && samplesWritten < numberOfSamples && !recordingCancelled) {
+        while (readBuffer != writeBuffer && samplesWritten < numberOfSamples + numberOfSamplesInHeader && !recordingCancelled) {
 
             /* Light LED during SD card write if appropriate */
 
@@ -583,35 +579,23 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
             filter(buffers[readBuffer], NUMBER_OF_SAMPLES_IN_BUFFER);
 
-            /* Write header to the first buffer */
-
-            uint32_t bytesOccupiedByHeader = 0;
-
-            if (buffersProcessed == NUMBER_OF_BUFFERS_TO_SKIP) {
-
-                bytesOccupiedByHeader = sizeof(wavHeader);
-
-                memcpy(buffers[readBuffer], &wavHeader, bytesOccupiedByHeader);
-
-            }
-
             /* Write the appropriate number of bytes to the SD card */
 
-            uint32_t numberOfBytesToWrite = 0;
+            uint32_t numberOfSamplesToWrite = 0;
 
             if (buffersProcessed >= NUMBER_OF_BUFFERS_TO_SKIP) {
 
-                numberOfBytesToWrite = MIN(bytesOccupiedByHeader + 2 * (numberOfSamples - samplesWritten), 2 * NUMBER_OF_SAMPLES_IN_BUFFER);
+                numberOfSamplesToWrite = MIN(numberOfSamples + numberOfSamplesInHeader - samplesWritten, NUMBER_OF_SAMPLES_IN_BUFFER);
 
             }
 
-            AudioMoth_writeToFile(buffers[readBuffer], numberOfBytesToWrite);
+            AudioMoth_writeToFile(buffers[readBuffer], 2 * numberOfSamplesToWrite);
 
             /* Increment buffer counters */
 
             readBuffer = (readBuffer + 1) & (NUMBER_OF_BUFFERS - 1);
 
-            samplesWritten += (numberOfBytesToWrite - bytesOccupiedByHeader) >> 1;
+            samplesWritten += numberOfSamplesToWrite;
 
             buffersProcessed += 1;
 
@@ -627,21 +611,31 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     }
 
-    /* Fix header if recording cancelled */
+    /* Initialise the WAV header */
 
-    if (samplesWritten < numberOfSamples) {
+    samplesWritten = MAX(numberOfSamplesInHeader, samplesWritten);
 
-        setHeaderDetails(configSettings->sampleRate, samplesWritten);
+    setHeaderDetails(configSettings->sampleRate, samplesWritten - numberOfSamplesInHeader);
 
-        AudioMoth_seekInFile(0);
+    setHeaderComment(currentTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain);
 
-        AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader));
+    /* Write the header */
+
+    if (enableLED) {
+
+        AudioMoth_setRedLED(true);
 
     }
 
+    AudioMoth_seekInFile(0);
+
+    AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader));
+
+    AudioMoth_setRedLED(false);
+
     /* Close the file */
 
-    RETURN_ON_ERROR(AudioMoth_closeFile());
+    AudioMoth_closeFile();
 
 }
 
