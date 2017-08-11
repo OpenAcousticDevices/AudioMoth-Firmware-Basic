@@ -38,7 +38,7 @@
 #define NUMBER_OF_SAMPLES_IN_DMA_TRANSFER   1024
 #define NUMBER_OF_BUFFERS_TO_SKIP           1
 
-/* WAVE header constant */
+/* WAV header constant */
 
 #define PCM_FORMAT                          1
 #define RIFF_ID_LENGTH                      4
@@ -74,7 +74,7 @@
     AudioMoth_powerDownAndWake(duration, true); \
 }
 
-#define MAX(a,b) (((a) (b)) ? (a) : (b))
+#define MAX(a,b) (((a) > (b)) ? (a) : (b))
 
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 
@@ -144,11 +144,11 @@ void setHeaderComment(uint32_t currentTime, uint8_t *serialNumber, uint32_t gain
 
     AM_batteryState_t batteryState = AudioMoth_getBatteryState();
 
-    sprintf(comment, "Recorded at %02d:%02d:%02d %02d/%02d/%04d by AudioMoth %08X%08X at gain setting %d while battery state was ",
+    sprintf(comment, "Recorded at %02d:%02d:%02d %02d/%02d/%04d (UTC) by AudioMoth %08X%08X at gain setting %d while battery state was ",
             time->tm_hour, time->tm_min, time->tm_sec, time->tm_mday, 1 + time->tm_mon, 1900 + time->tm_year,
             (unsigned int)(serialNumber + 8), (unsigned int)serialNumber, (unsigned int)gain);
 
-    comment += 104;
+    comment += 110;
 
     if (batteryState == AM_BATTERY_LOW) {
 
@@ -162,10 +162,7 @@ void setHeaderComment(uint32_t currentTime, uint8_t *serialNumber, uint32_t gain
 
         batteryState += 35;
 
-        int tens = batteryState / 10;
-        int units = batteryState - 10 * tens;
-
-        sprintf(comment, "%01d.%02dV", tens, units);
+        sprintf(comment, "%01d.%01dV", batteryState / 10, batteryState % 10);
 
     }
 
@@ -760,4 +757,3 @@ static void flashLedToIndicateBatteryLife(void){
     }
 
 }
-
