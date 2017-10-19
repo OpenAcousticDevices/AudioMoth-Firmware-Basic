@@ -50,7 +50,7 @@
 
 /* DC filter constant */
 
-#define DC_BLOCKING_BITS                    8
+#define DC_BLOCKING_FACTOR                  0.995f
 
 /* Useful macros */
 
@@ -168,7 +168,6 @@ void setHeaderComment(uint32_t currentTime, uint8_t *serialNumber, uint32_t gain
 
 }
 
-
 /* USB configuration data structure */
 
 #pragma pack(push, 1)
@@ -181,11 +180,11 @@ typedef struct {
 typedef struct {
     uint32_t time;
     uint8_t gain;
-    uint8_t clockBand;
     uint8_t clockDivider;
     uint8_t acquisitionCycles;
     uint8_t oversampleRate;
     uint32_t sampleRate;
+    uint8_t sampleRateDivider;
     uint16_t sleepDuration;
     uint16_t recordDuration;
     uint8_t enableLED;
@@ -198,11 +197,11 @@ typedef struct {
 configSettings_t defaultConfigSettings = {
     .time = 0,
     .gain = 2,
-    .clockBand = 4,
-    .clockDivider = 2,
-    .acquisitionCycles = 2,
-    .oversampleRate = 16,
-    .sampleRate = 48000,
+    .clockDivider = 4,
+    .acquisitionCycles = 16,
+    .oversampleRate = 1,
+    .sampleRate = 384000,
+    .sampleRateDivider = 8,
     .sleepDuration = 0,
     .recordDuration = 60,
     .enableLED = 1,
@@ -226,6 +225,8 @@ configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_AD
 
 /* DC filter variables */
 
+static int8_t bitsToShift;
+
 static int32_t previousSample;
 static int32_t previousFilterOutput;
 
@@ -238,15 +239,20 @@ static volatile bool recordingCancelled;
 
 static int16_t* buffers[NUMBER_OF_BUFFERS];
 
+/* DMA buffers */
+
+static int16_t primaryBuffer[NUMBER_OF_SAMPLES_IN_DMA_TRANSFER];
+static int16_t secondaryBuffer[NUMBER_OF_SAMPLES_IN_DMA_TRANSFER];
+
 /* Current recording file name */
 
 static char fileName[13];
 
 /* Function prototypes */
 
-static void filter(int16_t* data, int size);
 static void flashLedToIndicateBatteryLife(void);
 static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool enableLED);
+static void filter(int16_t *source, int16_t *dest, uint8_t sampleRateDivider, uint32_t size);
 static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording);
 
 /* Main function */
@@ -385,11 +391,17 @@ inline void AudioMoth_handleSwitchInterrupt() {
 
 inline void AudioMoth_handleMicrophoneInterrupt(int16_t sample) { }
 
-inline void AudioMoth_handleDirectMemoryAccessInterrupt(bool primaryChannel, int16_t **nextBuffer) {
+inline void AudioMoth_handleDirectMemoryAccessInterrupt(bool isPrimaryBuffer, int16_t **nextBuffer) {
+
+    int16_t *source = secondaryBuffer;
+
+    if (isPrimaryBuffer) source = primaryBuffer;
 
     /* Update the current buffer index and write buffer */
 
-    writeBufferIndex += NUMBER_OF_SAMPLES_IN_DMA_TRANSFER;
+    filter(source, buffers[writeBuffer] + writeBufferIndex, configSettings->sampleRateDivider, NUMBER_OF_SAMPLES_IN_DMA_TRANSFER);
+
+    writeBufferIndex += NUMBER_OF_SAMPLES_IN_DMA_TRANSFER / configSettings->sampleRateDivider;
 
     if (writeBufferIndex == NUMBER_OF_SAMPLES_IN_BUFFER) {
 
@@ -398,24 +410,6 @@ inline void AudioMoth_handleDirectMemoryAccessInterrupt(bool primaryChannel, int
         writeBuffer = (writeBuffer + 1) & (NUMBER_OF_BUFFERS - 1);
 
     }
-
-    /* Update the next buffer index and write buffer */
-
-    int nextWriteBuffer = writeBuffer;
-
-    int nextWriteBufferIndex = writeBufferIndex + NUMBER_OF_SAMPLES_IN_DMA_TRANSFER;
-
-    if (nextWriteBufferIndex == NUMBER_OF_SAMPLES_IN_BUFFER) {
-
-        nextWriteBufferIndex = 0;
-
-        nextWriteBuffer = (nextWriteBuffer + 1) & (NUMBER_OF_BUFFERS - 1);
-
-    }
-
-    /* Re-activate the DMA */
-
-    *nextBuffer = buffers[nextWriteBuffer] + nextWriteBufferIndex;
 
 }
 
@@ -457,30 +451,32 @@ inline void AudioMoth_usbApplicationPacketReceived(uint32_t messageType, uint8_t
 
 /* Remove DC offset from the microphone samples */
 
-static void filter(int16_t *data, int size) {
-
-    /* Calculate the multiplier to normalise the volume across different over sampling rates */
-
-    uint32_t multiplier = 16 / configSettings->oversampleRate;
-
-    if (multiplier == 0) {
-        multiplier = 1;
-    }
-
-    /* DC filter */
+static void filter(int16_t *source, int16_t *dest, uint8_t sampleRateDivider, uint32_t size) {
 
     int32_t filteredOutput;
     int32_t scaledPreviousFilterOutput;
 
-    for (int i = 0; i < size; i++) {
+    int index = 0;
 
-        int16_t sample = multiplier * data[i];
+    for (int i = 0; i < size; i += sampleRateDivider) {
 
-        scaledPreviousFilterOutput = (int32_t)(0.995f * previousFilterOutput);
+        int32_t sample = 0;
+
+        for (int j = 0; j < sampleRateDivider; j += 1) {
+
+            sample += source[i + j];
+
+        }
+
+        if (bitsToShift > 0) sample = sample << bitsToShift;
+
+        if (bitsToShift < 0) sample = sample >> -bitsToShift;
+
+        scaledPreviousFilterOutput = (int32_t)(DC_BLOCKING_FACTOR * previousFilterOutput);
 
         filteredOutput = sample - previousSample + scaledPreviousFilterOutput;
 
-        data[i] = (int16_t)filteredOutput;
+        dest[index++] = (int16_t)filteredOutput;
 
         previousFilterOutput = filteredOutput;
 
@@ -508,29 +504,29 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
         buffers[i] = buffers[i - 1] + NUMBER_OF_SAMPLES_IN_BUFFER;
     }
 
-    /* Switch to HFRCO */
+    /* Calculate the bits to shift */
 
-    if (configSettings->clockBand < AM_HFXO) {
+    bitsToShift = 0;
 
-        AudioMoth_enableHFRCO(configSettings->clockBand);
+    uint8_t oversampleRate = configSettings->oversampleRate;
 
-        uint32_t clockFrequency = AudioMoth_getClockFrequency(configSettings->clockBand);
+    uint8_t sampleRateDivider = configSettings->sampleRateDivider;
 
-        uint32_t actualSampleRate = AudioMoth_calculateSampleRate(clockFrequency, configSettings->clockDivider, configSettings->acquisitionCycles, configSettings->oversampleRate);
+    while (oversampleRate < 16) {
+        oversampleRate = oversampleRate << 1;
+        bitsToShift += 1;
+    }
 
-        uint32_t targetFrequency = (float)clockFrequency * (float)configSettings->sampleRate / (float)actualSampleRate;
-
-        AudioMoth_calibrateHFRCO(targetFrequency);
-
-        AudioMoth_selectHFRCO();
-
+    while (sampleRateDivider > 1) {
+        sampleRateDivider = sampleRateDivider >> 1;
+        bitsToShift -= 1;
     }
 
     /* Calculate recording parameters */
 
     uint32_t numberOfSamplesInHeader = sizeof(wavHeader) >> 1;
 
-    uint32_t numberOfSamples = configSettings->sampleRate * recordDuration;
+    uint32_t numberOfSamples = configSettings->sampleRate / configSettings->sampleRateDivider * recordDuration;
 
     /* Initialise microphone for recording */
 
@@ -538,9 +534,9 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     AudioMoth_enableMicrophone(configSettings->gain, configSettings->clockDivider, configSettings->acquisitionCycles, configSettings->oversampleRate);
 
-    AudioMoth_initialiseDirectMemoryAccess(buffers[0], buffers[0] + NUMBER_OF_SAMPLES_IN_DMA_TRANSFER, NUMBER_OF_SAMPLES_IN_DMA_TRANSFER);
+    AudioMoth_initialiseDirectMemoryAccess(primaryBuffer, secondaryBuffer, NUMBER_OF_SAMPLES_IN_DMA_TRANSFER);
 
-    AudioMoth_startMicrophoneSamples();
+    AudioMoth_startMicrophoneSamples(configSettings->sampleRate);
 
     /* Initialise file system and open a new file */
 
@@ -571,10 +567,6 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
                 AudioMoth_setRedLED(true);
 
             }
-
-            /* DC filter the microphone samples */
-
-            filter(buffers[readBuffer], NUMBER_OF_SAMPLES_IN_BUFFER);
 
             /* Write the appropriate number of bytes to the SD card */
 
@@ -612,7 +604,7 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     samplesWritten = MAX(numberOfSamplesInHeader, samplesWritten);
 
-    setHeaderDetails(configSettings->sampleRate, samplesWritten - numberOfSamplesInHeader);
+    setHeaderDetails(configSettings->sampleRate / configSettings->sampleRateDivider, samplesWritten - numberOfSamplesInHeader);
 
     setHeaderComment(currentTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain);
 
@@ -757,3 +749,4 @@ static void flashLedToIndicateBatteryLife(void){
     }
 
 }
+
