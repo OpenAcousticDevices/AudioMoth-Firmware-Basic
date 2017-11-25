@@ -9,6 +9,10 @@ Clone the contents of [AudioMoth-Project](https://github.com/OpenAcousticDevices
 
 Replace ```src/main.c``` with this repository.
 
+### Documentation ####
+
+See the [Wiki](https://github.com/OpenAcousticDevices/AudioMoth-Firmware-Basic/wiki/AudioMoth) for documentation.
+
 ### License ###
 
 Copyright 2017 [Open Acoustic Devices](http://www.openacousticdevices.info/).
