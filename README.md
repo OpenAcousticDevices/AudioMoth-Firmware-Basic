@@ -11,7 +11,7 @@ Replace ```src/main.c``` with this repository.
 
 ### Documentation ####
 
-See the [Wiki](https://github.com/OpenAcousticDevices/AudioMoth-Firmware-Basic/wiki/AudioMoth) for documentation.
+See the [Wiki](https://github.com/OpenAcousticDevices/AudioMoth-Firmware-Basic/wiki/AudioMoth) for detailed description of the example code.
 
 ### License ###
 
