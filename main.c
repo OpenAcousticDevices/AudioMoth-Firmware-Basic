@@ -1,7 +1,7 @@
 /****************************************************************************
  * main.c
  * openacousticdevices.info
- * June 2017
+ * Sept 2018
  *****************************************************************************/
 
 #include <time.h>
@@ -146,23 +146,23 @@ void setHeaderComment(uint32_t currentTime, uint8_t *serialNumber, uint32_t gain
 
     sprintf(comment, "Recorded at %02d:%02d:%02d %02d/%02d/%04d (UTC) by AudioMoth %08X%08X at gain setting %d while battery state was ",
             time->tm_hour, time->tm_min, time->tm_sec, time->tm_mday, 1 + time->tm_mon, 1900 + time->tm_year,
-            (unsigned int)(serialNumber + 8), (unsigned int)serialNumber, (unsigned int)gain);
+            (unsigned int)*((uint32_t*)serialNumber + 1), (unsigned int)*((uint32_t*)serialNumber), (unsigned int)gain);
 
     comment += 110;
 
     if (batteryState == AM_BATTERY_LOW) {
 
-        sprintf(comment, "< 3.6V");
+        sprintf(comment, "< 3.6V.");
 
     } else if (batteryState >= AM_BATTERY_FULL) {
 
-        sprintf(comment, "> 5.0V");
+        sprintf(comment, "> 5.0V.");
 
     } else {
 
         batteryState += 35;
 
-        sprintf(comment, "%01d.%01dV", batteryState / 10, batteryState % 10);
+        sprintf(comment, "%01d.%01dV.", batteryState / 10, batteryState % 10);
 
     }
 
@@ -246,7 +246,13 @@ static int16_t secondaryBuffer[NUMBER_OF_SAMPLES_IN_DMA_TRANSFER];
 
 /* Current recording file name */
 
-static char fileName[13];
+static char fileName[20];
+
+/* Firmware version and description */
+
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 0};
+
+static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
 /* Function prototypes */
 
@@ -381,7 +387,7 @@ int main(void) {
 
 }
 
-/* AudioMoth handlers */
+/* AudioMoth interrupt handlers */
 
 inline void AudioMoth_handleSwitchInterrupt() {
 
@@ -413,6 +419,20 @@ inline void AudioMoth_handleDirectMemoryAccessInterrupt(bool isPrimaryBuffer, in
 
 }
 
+/* AudioMoth USB message handlers */
+
+void AudioMoth_usbFirmwareVersionRequested(uint8_t **firmwareVersionPtr) {
+
+    *firmwareVersionPtr = firmwareVersion;
+
+}
+
+void AudioMoth_usbFirmwareDescriptionRequested(uint8_t **firmwareDescriptionPtr) {
+
+    *firmwareDescriptionPtr = firmwareDescription;
+
+}
+
 inline void AudioMoth_usbApplicationPacketRequested(uint32_t messageType, uint8_t *transmitBuffer, uint32_t size) {
 
     /* Copy the current time to the USB packet */
@@ -430,6 +450,14 @@ inline void AudioMoth_usbApplicationPacketRequested(uint32_t messageType, uint8_
     AM_batteryState_t batteryState = AudioMoth_getBatteryState();
 
     memcpy(transmitBuffer + 5 + AM_UNIQUE_ID_SIZE_IN_BYTES, &batteryState, 1);
+
+    /* Copy the firmware version to the USB packet */
+
+    memcpy(transmitBuffer + 6 + AM_UNIQUE_ID_SIZE_IN_BYTES, firmwareVersion, AM_FIRMWARE_VERSION_LENGTH);
+
+    /* Copy the firmware description to the USB packet */
+
+    memcpy(transmitBuffer + 6 + AM_UNIQUE_ID_SIZE_IN_BYTES + AM_FIRMWARE_VERSION_LENGTH, firmwareDescription, AM_FIRMWARE_DESCRIPTION_LENGTH);
 
 }
 
@@ -468,19 +496,33 @@ static void filter(int16_t *source, int16_t *dest, uint8_t sampleRateDivider, ui
 
         }
 
-        if (bitsToShift > 0) sample = sample << bitsToShift;
+        if (bitsToShift > 0) {
 
-        if (bitsToShift < 0) sample = sample >> -bitsToShift;
+            sample = sample >> bitsToShift;
+
+        }
 
         scaledPreviousFilterOutput = (int32_t)(DC_BLOCKING_FACTOR * previousFilterOutput);
 
         filteredOutput = sample - previousSample + scaledPreviousFilterOutput;
 
-        dest[index++] = (int16_t)filteredOutput;
+        if (filteredOutput > INT16_MAX) {
+
+            dest[index++] = INT16_MAX;
+
+        } else if (filteredOutput < INT16_MIN) {
+
+            dest[index++] = INT16_MIN;
+
+        } else {
+
+            dest[index++] = (int16_t)filteredOutput;
+
+        }
 
         previousFilterOutput = filteredOutput;
 
-        previousSample = (int32_t)sample;
+        previousSample = sample;
 
     }
 
@@ -508,18 +550,11 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     bitsToShift = 0;
 
-    uint8_t oversampleRate = configSettings->oversampleRate;
+    uint16_t oversampling = configSettings->oversampleRate * configSettings->sampleRateDivider;
 
-    uint8_t sampleRateDivider = configSettings->sampleRateDivider;
-
-    while (oversampleRate < 16) {
-        oversampleRate = oversampleRate << 1;
+    while (oversampling > 16) {
+        oversampling = oversampling >> 1;
         bitsToShift += 1;
-    }
-
-    while (sampleRateDivider > 1) {
-        sampleRateDivider = sampleRateDivider >> 1;
-        bitsToShift -= 1;
     }
 
     /* Calculate recording parameters */
@@ -539,14 +574,26 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
     AudioMoth_startMicrophoneSamples(configSettings->sampleRate);
 
     /* Initialise file system and open a new file */
+   
+    if (enableLED) {
+
+        AudioMoth_setRedLED(true);
+
+    }
 
     RETURN_ON_ERROR(AudioMoth_enableFileSystem());
 
     /* Open a file with the name as a UNIX time stamp in HEX */
 
-    sprintf(fileName, "%08X.WAV", (unsigned int)currentTime);
+    time_t rawtime = currentTime;
+
+    struct tm *time = gmtime(&rawtime);
+
+    sprintf(fileName, "%04d%02d%02d_%02d%02d%02d.WAV", 1900 + time->tm_year, time->tm_mon + 1, time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec);
 
     RETURN_ON_ERROR(AudioMoth_openFile(fileName));
+
+    AudioMoth_setRedLED(false);
 
     /* Main record loop */
 
@@ -578,7 +625,7 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
             }
 
-            AudioMoth_writeToFile(buffers[readBuffer], 2 * numberOfSamplesToWrite);
+            RETURN_ON_ERROR(AudioMoth_writeToFile(buffers[readBuffer], 2 * numberOfSamplesToWrite));
 
             /* Increment buffer counters */
 
@@ -616,15 +663,15 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     }
 
-    AudioMoth_seekInFile(0);
+    RETURN_ON_ERROR(AudioMoth_seekInFile(0));
 
-    AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader));
-
-    AudioMoth_setRedLED(false);
+    RETURN_ON_ERROR(AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader)));
 
     /* Close the file */
 
-    AudioMoth_closeFile();
+    RETURN_ON_ERROR(AudioMoth_closeFile());
+
+    AudioMoth_setRedLED(false);
 
 }
 
