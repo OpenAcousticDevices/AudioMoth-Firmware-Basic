@@ -1,7 +1,7 @@
 # AudioMoth-Firmware-Basic
 Basic firmware for AudioMoth devices, usable in conjunction with the AudioMoth-Project framework.
 
-Compatible with the [AudioMoth Configuration app](https://github.com/OpenAcousticDevices/AudioMoth-Config-App). For usage instructions, visit [Open Acoustic Devices](https://www.openacousticdevices.info/getting-started).
+Compatible with the [AudioMoth Config App](https://github.com/OpenAcousticDevices/AudioMoth-Config-App). For usage instructions, visit [Open Acoustic Devices](https://www.openacousticdevices.info/getting-started).
 
 ### Usage ####
 
