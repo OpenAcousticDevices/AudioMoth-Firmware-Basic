@@ -134,9 +134,9 @@ void setHeaderDetails(uint32_t sampleRate, uint32_t numberOfSamples) {
 
 }
 
-void setHeaderComment(uint32_t currentTime, uint8_t *serialNumber, uint32_t gain) {
+void setHeaderComment(uint32_t currentTime, int8_t timezone, uint8_t *serialNumber, uint32_t gain) {
 
-    time_t rawtime = currentTime;
+    time_t rawtime = currentTime + timezone * SECONDS_IN_HOUR;
 
     struct tm *time = gmtime(&rawtime);
 
@@ -144,11 +144,21 @@ void setHeaderComment(uint32_t currentTime, uint8_t *serialNumber, uint32_t gain
 
     AM_batteryState_t batteryState = AudioMoth_getBatteryState();
 
-    sprintf(comment, "Recorded at %02d:%02d:%02d %02d/%02d/%04d (UTC) by AudioMoth %08X%08X at gain setting %d while battery state was ",
-            time->tm_hour, time->tm_min, time->tm_sec, time->tm_mday, 1 + time->tm_mon, 1900 + time->tm_year,
-            (unsigned int)*((uint32_t*)serialNumber + 1), (unsigned int)*((uint32_t*)serialNumber), (unsigned int)gain);
+    sprintf(comment, "Recorded at %02d:%02d:%02d %02d/%02d/%04d (UTC", time->tm_hour, time->tm_min, time->tm_sec, time->tm_mday, 1 + time->tm_mon, 1900 + time->tm_year);
 
-    comment += 110;
+    comment += 36;
+
+    if (timezone < 0) sprintf(comment, "%d", timezone);
+
+    if (timezone > 0) sprintf(comment, "+%d", timezone);
+
+    if (timezone < 0 || timezone > 0) comment += 2;
+
+    if (timezone < -9 || timezone > 9) comment += 1;
+
+    sprintf(comment, ") by AudioMoth %08X%08X at gain setting %d while battery state was ", (unsigned int)*((uint32_t*)serialNumber + 1), (unsigned int)*((uint32_t*)serialNumber), (unsigned int)gain);
+
+    comment += 74;
 
     if (batteryState == AM_BATTERY_LOW) {
 
@@ -190,6 +200,7 @@ typedef struct {
     uint8_t enableLED;
     uint8_t activeStartStopPeriods;
     startStopPeriod_t startStopPeriods[MAX_START_STOP_PERIODS];
+    int8_t timezone;
 } configSettings_t;
 
 #pragma pack(pop)
@@ -212,7 +223,8 @@ configSettings_t defaultConfigSettings = {
         {.startMinutes = 540, .stopMinutes = 600},
         {.startMinutes = 720, .stopMinutes = 780},
         {.startMinutes = 900, .stopMinutes = 960}
-    }
+    },
+    .timezone = 0
 };
 
 uint32_t *previousSwitchPosition = (uint32_t*)AM_BACKUP_DOMAIN_START_ADDRESS;
@@ -386,6 +398,15 @@ int main(void) {
     SAVE_SWITCH_POSITION_AND_POWER_DOWN(secondsToSleep);
 
 }
+
+/* Time zone handler */
+
+void AudioMoth_timezoneRequested(int8_t *timezone) {
+
+    *timezone = configSettings->timezone;
+
+}
+
 
 /* AudioMoth interrupt handlers */
 
@@ -583,9 +604,9 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     RETURN_ON_ERROR(AudioMoth_enableFileSystem());
 
-    /* Open a file with the name as a UNIX time stamp in HEX */
+    /* Open a file with the current local time as the name */
 
-    time_t rawtime = currentTime;
+    time_t rawtime = currentTime + configSettings->timezone * SECONDS_IN_HOUR;
 
     struct tm *time = gmtime(&rawtime);
 
@@ -653,7 +674,7 @@ static void makeRecording(uint32_t currentTime, uint32_t recordDuration, bool en
 
     setHeaderDetails(configSettings->sampleRate / configSettings->sampleRateDivider, samplesWritten - numberOfSamplesInHeader);
 
-    setHeaderComment(currentTime, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain);
+    setHeaderComment(currentTime, configSettings->timezone, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain);
 
     /* Write the header */
 
