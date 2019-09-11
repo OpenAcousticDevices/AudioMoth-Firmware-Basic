@@ -691,7 +691,7 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     struct tm *time = gmtime(&rawtime);
 
-    sprintf(fileName, "%04d%02d%02d_%02d%02d%02d.WAV", 1900 + time->tm_year, time->tm_mon + 1, time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec);
+    sprintf(fileName, "%04d%02d%02dT%02d%02d%02dZ.WAV", 1900 + time->tm_year, time->tm_mon + 1, time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec);
 
     RETURN_ON_ERROR(AudioMoth_openFile(fileName));
 
