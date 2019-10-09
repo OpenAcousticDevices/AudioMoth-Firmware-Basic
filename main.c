@@ -148,9 +148,9 @@ void setHeaderDetails(uint32_t sampleRate, uint32_t numberOfSamples) {
 
 }
 
-void setHeaderComment(uint32_t currentTime, int8_t timezone, uint8_t *serialNumber, uint32_t gain, AM_batteryState_t batteryState, bool batteryVoltageLow, bool switchPositionChanged) {
+void setHeaderComment(uint32_t currentTime, int8_t timezoneHours, int8_t timezoneMinutes, uint8_t *serialNumber, uint32_t gain, AM_batteryState_t batteryState, bool batteryVoltageLow, bool switchPositionChanged) {
 
-    time_t rawtime = currentTime + timezone * SECONDS_IN_HOUR;
+    time_t rawtime = currentTime + timezoneHours * SECONDS_IN_HOUR + timezoneMinutes + SECONDS_IN_MINUTE;
 
     struct tm *time = gmtime(&rawtime);
 
@@ -168,13 +168,19 @@ void setHeaderComment(uint32_t currentTime, int8_t timezone, uint8_t *serialNumb
 
     comment += 36;
 
-    if (timezone < 0) sprintf(comment, "%d", timezone);
+    if (timezoneHours < 0) sprintf(comment, "%d", timezoneHours);
 
-    if (timezone > 0) sprintf(comment, "+%d", timezone);
+    if (timezoneHours > 0) sprintf(comment, "+%d", timezoneHours);
 
-    if (timezone < 0 || timezone > 0) comment += 2;
+    if (timezoneHours < 0 || timezoneHours > 0) comment += 2;
 
-    if (timezone < -9 || timezone > 9) comment += 1;
+    if (timezoneHours < -9 || timezoneHours > 9) comment += 1;
+
+    if (timezoneMinutes < 0) sprintf(comment, ":%2d", -timezoneMinutes);
+
+    if (timezoneMinutes > 0) sprintf(comment, ":%2d", timezoneMinutes);
+
+    if (timezoneMinutes < 0 || timezoneMinutes > 0) comment += 3;
 
     sprintf(comment, ") by %s at gain setting %d while battery state was ", artist, (unsigned int)gain);
 
@@ -244,14 +250,15 @@ typedef struct {
     uint8_t enableLED;
     uint8_t activeStartStopPeriods;
     startStopPeriod_t startStopPeriods[MAX_START_STOP_PERIODS];
-    int8_t timezone;
+    int8_t timezoneHours;
     uint8_t enableBatteryCheck;
     uint8_t disableBatteryLevelDisplay;
+    int8_t timezoneMinutes;
 } configSettings_t;
 
 #pragma pack(pop)
 
-configSettings_t defaultConfigSettings = {
+static const configSettings_t defaultConfigSettings = {
     .time = 0,
     .gain = 2,
     .clockDivider = 4,
@@ -270,18 +277,19 @@ configSettings_t defaultConfigSettings = {
         {.startMinutes = 720, .stopMinutes = 780},
         {.startMinutes = 900, .stopMinutes = 960}
     },
-    .timezone = 0,
+    .timezoneHours = 0,
     .enableBatteryCheck = 0,
-    .disableBatteryLevelDisplay = 0
+    .disableBatteryLevelDisplay = 0,
+    .timezoneMinutes = 0
 };
 
-uint32_t *previousSwitchPosition = (uint32_t*)AM_BACKUP_DOMAIN_START_ADDRESS;
+static uint32_t *previousSwitchPosition = (uint32_t*)AM_BACKUP_DOMAIN_START_ADDRESS;
 
-uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 4);
+static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 4);
 
-uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
+static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
 
-configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
+static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
 
 /* DC filter variables */
 
@@ -312,7 +320,7 @@ static char fileName[20];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 2, 2};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -322,6 +330,32 @@ static void flashLedToIndicateBatteryLife(void);
 static void filter(int16_t *source, int16_t *dest, uint8_t sampleRateDivider, uint32_t size);
 static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording);
 static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDuration, bool enableLED, AM_batteryState_t batteryState);
+
+/* Functions of copy to and from the backup domain */
+
+static void copyFromBackupDomain(uint8_t *dst, uint32_t *src, uint32_t length) {
+
+    for (uint32_t i = 0; i < length; i += 1) {
+        *(dst + i) = *((uint8_t*)src + i);
+    }
+
+}
+
+static void copyToBackupDomain(uint32_t *dst, uint8_t *src, uint32_t length) {
+
+    uint32_t value = 0;
+
+    for (uint32_t i = 0; i < length / 4; i += 1) {
+        *(dst + i) = *((uint32_t*)src + i);
+    }
+
+    for (uint32_t i = 0; i < length % 4; i += 1) {
+        value = (value << 8) + *(src + length - 1 - i);
+    }
+
+    *(dst + length / 4) = value;
+
+}
 
 /* Main function */
 
@@ -341,7 +375,7 @@ int main(void) {
 
         *previousSwitchPosition = AM_SWITCH_NONE;
 
-        memcpy(configSettings, &defaultConfigSettings, sizeof(configSettings_t));
+        copyToBackupDomain((uint32_t*)configSettings, (uint8_t*)&defaultConfigSettings, sizeof(configSettings_t));
 
     } else {
 
@@ -447,7 +481,7 @@ int main(void) {
 
         /* Flash LED to indicate waiting */
 
-        FLASH_LED(Green, WAITING_LED_FLASH_DURATION)
+        FLASH_LED(Green, WAITING_LED_FLASH_DURATION);
 
     }
 
@@ -469,9 +503,11 @@ int main(void) {
 
 /* Time zone handler */
 
-inline void AudioMoth_timezoneRequested(int8_t *timezone) {
+inline void AudioMoth_timezoneRequested(int8_t *timezoneHours, int8_t *timezoneMinutes) {
 
-    *timezone = configSettings->timezone;
+    *timezoneHours = configSettings->timezoneHours;
+
+    *timezoneMinutes = configSettings->timezoneMinutes;
 
 }
 
@@ -556,11 +592,11 @@ inline void AudioMoth_usbApplicationPacketReceived(uint32_t messageType, uint8_t
 
     /* Copy the USB packet contents to the back-up register data structure location */
 
-    memcpy(configSettings, receiveBuffer + 1, sizeof(configSettings_t));
+    copyToBackupDomain((uint32_t*)configSettings,  receiveBuffer + 1, sizeof(configSettings_t));
 
     /* Copy the back-up register data structure to the USB packet */
 
-    memcpy(transmitBuffer + 1, configSettings, sizeof(configSettings_t));
+    copyFromBackupDomain(transmitBuffer + 1, (uint32_t*)configSettings, sizeof(configSettings_t));
 
     /* Set the time */
 
@@ -591,7 +627,7 @@ static void filter(int16_t *source, int16_t *dest, uint8_t sampleRateDivider, ui
 
         if (bitsToShift < 0) sample >>= -bitsToShift;
 
-        scaledPreviousFilterOutput = (int32_t)(DC_BLOCKING_FACTOR * previousFilterOutput);
+        scaledPreviousFilterOutput = (int32_t)(DC_BLOCKING_FACTOR * (float)previousFilterOutput);
 
         filteredOutput = sample - previousSample + scaledPreviousFilterOutput;
 
@@ -687,7 +723,7 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     /* Open a file with the current local time as the name */
 
-    time_t rawtime = currentTime + configSettings->timezone * SECONDS_IN_HOUR;
+    time_t rawtime = currentTime + configSettings->timezoneHours * SECONDS_IN_HOUR + configSettings->timezoneMinutes * SECONDS_IN_MINUTE;
 
     struct tm *time = gmtime(&rawtime);
 
@@ -777,7 +813,7 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     setHeaderDetails(configSettings->sampleRate / configSettings->sampleRateDivider, samplesWritten - numberOfSamplesInHeader);
 
-    setHeaderComment(currentTime, configSettings->timezone, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain, batteryState, batteryVoltageLow, switchPositionChanged);
+    setHeaderComment(currentTime, configSettings->timezoneHours, configSettings->timezoneMinutes, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain, batteryState, batteryVoltageLow, switchPositionChanged);
 
     /* Write the header */
 
@@ -811,15 +847,11 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     /* Check number of active state stop periods */
 
-    if (configSettings->activeStartStopPeriods > MAX_START_STOP_PERIODS) {
-
-        configSettings->activeStartStopPeriods = MAX_START_STOP_PERIODS;
-
-    }
+    uint32_t activeStartStopPeriods = MIN(configSettings->activeStartStopPeriods, MAX_START_STOP_PERIODS);
 
     /* No active periods */
 
-    if (configSettings->activeStartStopPeriods == 0) {
+    if (activeStartStopPeriods == 0) {
 
         *timeOfNextRecording = UINT32_MAX;
 
@@ -841,7 +873,7 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     uint32_t durationOfCycle = configSettings->recordDuration + configSettings->sleepDuration;
 
-    for (uint32_t i = 0; i < configSettings->activeStartStopPeriods; i += 1) {
+    for (uint32_t i = 0; i < activeStartStopPeriods; i += 1) {
 
         startStopPeriod_t *period = configSettings->startStopPeriods + i;
 
@@ -928,4 +960,3 @@ static void flashLedToIndicateBatteryLife(void){
     }
 
 }
-
