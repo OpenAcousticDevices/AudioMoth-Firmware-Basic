@@ -150,7 +150,7 @@ void setHeaderDetails(uint32_t sampleRate, uint32_t numberOfSamples) {
 
 void setHeaderComment(uint32_t currentTime, int8_t timezoneHours, int8_t timezoneMinutes, uint8_t *serialNumber, uint32_t gain, AM_batteryState_t batteryState, bool batteryVoltageLow, bool switchPositionChanged) {
 
-    time_t rawtime = currentTime + timezoneHours * SECONDS_IN_HOUR + timezoneMinutes + SECONDS_IN_MINUTE;
+    time_t rawtime = currentTime + timezoneHours * SECONDS_IN_HOUR + timezoneMinutes * SECONDS_IN_MINUTE;
 
     struct tm *time = gmtime(&rawtime);
 
