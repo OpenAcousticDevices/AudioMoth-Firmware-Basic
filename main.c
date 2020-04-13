@@ -146,7 +146,10 @@ void setHeaderComment(uint32_t currentTime, int8_t timezoneHours, int8_t timezon
 
     /* Format artist field */
     char *artist = wavHeader.iart.artist;
-    sprintf(artist, "AudioMoth %08X%08X", (unsigned int)*((uint32_t*)serialNumber + 1), (unsigned int)*((uint32_t*)serialNumber));
+    artist += sprintf(artist, "AudioMoth ");
+    for (int i = 0; i < 8; i++) {
+        artist += sprintf(artist, "%02X", serialNumber[7 - i]);
+    }
 
     /* Format comment field */
     char *comment = wavHeader.icmt.comment;
@@ -155,7 +158,7 @@ void setHeaderComment(uint32_t currentTime, int8_t timezoneHours, int8_t timezon
     if (timezoneHours > 0) comment += sprintf(comment, "+%d", timezoneHours);
     if (timezoneMinutes < 0) comment += sprintf(comment, ":%2d", -timezoneMinutes);
     if (timezoneMinutes > 0) comment += sprintf(comment, ":%2d", timezoneMinutes);
-    comment += sprintf(comment, ") by %s at gain setting %d while battery state was ", artist, (unsigned int)gain);
+    comment += sprintf(comment, ") by %s at gain setting %d while battery state was ", wavHeader.iart.artist, (unsigned int)gain);
 
     if (batteryState == AM_BATTERY_LOW) {
         comment += sprintf(comment, "less than 3.6V.");
