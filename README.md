@@ -7,7 +7,7 @@ Compatible with the [AudioMoth Configuration App](https://github.com/OpenAcousti
 
 Clone the contents of [AudioMoth-Project](https://github.com/OpenAcousticDevices/AudioMoth-Project).
 
-Replace ```src/main.c``` with this repository.
+Replace ```src/main.c``` with this ```main.c``` from this repository. Put ```digitalFilters.c``` in the ```/src/``` folder and ```digitalFilters.h``` in the ```/inc/``` folder.
 
 ### Documentation ####
 
