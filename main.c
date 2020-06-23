@@ -569,7 +569,7 @@ static char fileName[32];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 4, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 4, 1};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -1254,53 +1254,73 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
         uint32_t stopSeconds = SECONDS_IN_MINUTE * period->stopMinutes;
 
-        /* Calculate time to next period or time to next start in this period */
+        uint32_t durationOfStartStopPeriod = stopSeconds - startSeconds;
+
+        /* Check if the start stop period has not yet started */
 
         if (currentSeconds <= startSeconds) {
 
-            *timeOfNextRecording = currentTime + (startSeconds - currentSeconds);
+            *timeOfNextRecording = currentTime + startSeconds - currentSeconds;
 
             if (configSettings->disableSleepRecordCycle) {
 
-                *durationOfNextRecording = stopSeconds - startSeconds;
+                *durationOfNextRecording = durationOfStartStopPeriod;
 
             } else {
 
-                *durationOfNextRecording = MIN(configSettings->recordDuration, stopSeconds - startSeconds);
+                *durationOfNextRecording = MIN(configSettings->recordDuration, durationOfStartStopPeriod);
 
             }
 
             goto done;
 
-        } else if (currentSeconds < stopSeconds) {
+        }
+
+        /* Check if currently inside a start stop period */
+
+        if (currentSeconds < stopSeconds) {
+
+            /* Handle case with no sleep record cycle */
+
+            uint32_t secondsFromStartOfPeriod = currentSeconds - startSeconds;
 
             if (configSettings->disableSleepRecordCycle) {
 
                 *timeOfNextRecording = currentTime;
 
-                *durationOfNextRecording = stopSeconds - currentSeconds;
+                *durationOfNextRecording = durationOfStartStopPeriod - secondsFromStartOfPeriod;;
 
                 goto done;
 
-            } else {
+            }
 
-                uint32_t durationOfCycle = configSettings->recordDuration + configSettings->sleepDuration;
+            /* Check if recording should start immediately */
 
-                uint32_t secondsFromStartOfPeriod = currentSeconds - startSeconds;
+            uint32_t durationOfCycle = configSettings->recordDuration + configSettings->sleepDuration;
 
-                uint32_t partialCycle = secondsFromStartOfPeriod % durationOfCycle;
+            uint32_t partialCycle = secondsFromStartOfPeriod % durationOfCycle;
 
-                if (partialCycle > 0) secondsFromStartOfPeriod += durationOfCycle - partialCycle;
+            if (partialCycle < configSettings->recordDuration) {
 
-                if (secondsFromStartOfPeriod < stopSeconds - startSeconds) {
+                *timeOfNextRecording = currentTime;
 
-                    *timeOfNextRecording = currentTime + (startSeconds - currentSeconds) + secondsFromStartOfPeriod;
+                *durationOfNextRecording = MIN(configSettings->recordDuration - partialCycle, durationOfStartStopPeriod - secondsFromStartOfPeriod);
 
-                    *durationOfNextRecording = MIN(configSettings->recordDuration, stopSeconds - startSeconds - secondsFromStartOfPeriod);
+                goto done;
 
-                    goto done;
+            }
 
-                }
+            /* Wait for next cycle to begin */
+
+            secondsFromStartOfPeriod += durationOfCycle - partialCycle;
+
+            if (secondsFromStartOfPeriod < durationOfStartStopPeriod) {
+
+                *timeOfNextRecording = currentTime + durationOfCycle - partialCycle;
+
+                *durationOfNextRecording = MIN(configSettings->recordDuration, durationOfStartStopPeriod - secondsFromStartOfPeriod);
+
+                goto done;
 
             }
 
@@ -1316,15 +1336,17 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     uint32_t stopSeconds = SECONDS_IN_MINUTE * firstPeriod->stopMinutes;
 
+    uint32_t durationOfStartStopPeriod = stopSeconds - startSeconds;
+
     *timeOfNextRecording = currentTime + (SECONDS_IN_DAY - currentSeconds) + startSeconds;
 
     if (configSettings->disableSleepRecordCycle) {
 
-        *durationOfNextRecording = stopSeconds - startSeconds;
+        *durationOfNextRecording = durationOfStartStopPeriod;
 
     } else {
 
-        *durationOfNextRecording = MIN(configSettings->recordDuration, stopSeconds - startSeconds);
+        *durationOfNextRecording = MIN(configSettings->recordDuration, durationOfStartStopPeriod);
 
     }
 
