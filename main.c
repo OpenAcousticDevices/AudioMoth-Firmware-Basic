@@ -54,6 +54,10 @@
 
 #define COMPRESSION_BUFFER_SIZE_IN_BYTES    512
 
+/* File size constants */
+
+#define MAXIMUM_WAV_FILE_SIZE              (UINT32_MAX - 1)
+
 /* WAV header constant */
 
 #define PCM_FORMAT                          1
@@ -115,7 +119,7 @@
 
 /* Recording state enumeration */
 
-typedef enum {RECORDING_OKAY, SWITCH_CHANGED, SDCARD_WRITE_ERROR, VOLTAGE_CHECK} AM_recordingState_t;
+typedef enum {RECORDING_OKAY, FILE_SIZE_LIMITED, SUPPLY_VOLTAGE_LOW, SWITCH_CHANGED, SDCARD_WRITE_ERROR} AM_recordingState_t;
 
 /* Filter type enumeration */
 
@@ -186,7 +190,7 @@ static void setHeaderDetails(wavHeader_t *wavHeader, uint32_t sampleRate, uint32
 
 }
 
-static void setHeaderComment(wavHeader_t *wavHeader, uint32_t currentTime, int8_t timezoneHours, int8_t timezoneMinutes, uint8_t *serialNumber, uint32_t gain, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature, bool supplyVoltageLow, bool switchPositionChanged, uint32_t amplitudeThreshold, AM_filterType_t filterType, uint32_t lowerFilterFreq, uint32_t higherFilterFreq) {
+static void setHeaderComment(wavHeader_t *wavHeader, uint32_t currentTime, int8_t timezoneHours, int8_t timezoneMinutes, uint8_t *serialNumber, uint32_t gain, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature, bool switchPositionChanged, bool supplyVoltageLow, bool fileSizeLimited, uint32_t amplitudeThreshold, AM_filterType_t filterType, uint32_t lowerFilterFreq, uint32_t higherFilterFreq) {
 
     time_t rawtime = currentTime + timezoneHours * SECONDS_IN_HOUR + timezoneMinutes * SECONDS_IN_MINUTE;
 
@@ -270,17 +274,21 @@ static void setHeaderComment(wavHeader_t *wavHeader, uint32_t currentTime, int8_
 
     }
 
-    if (supplyVoltageLow || switchPositionChanged) {
+    if (supplyVoltageLow || switchPositionChanged || fileSizeLimited) {
 
         comment += sprintf(comment, " Recording cancelled before completion due to ");
 
-        if (supplyVoltageLow) {
+        if (switchPositionChanged) {
+
+            comment += sprintf(comment, "change of switch position.");
+
+        } else if (supplyVoltageLow) {
 
             comment += sprintf(comment, "low voltage.");
 
-        } else if (switchPositionChanged) {
+        } else if (fileSizeLimited) {
 
-            comment += sprintf(comment, "change of switch position.");
+            comment += sprintf(comment, "file size limit.");
 
         }
 
@@ -569,7 +577,7 @@ static char fileName[32];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 4, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 4, 2};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -685,19 +693,19 @@ int main(void) {
 
          /* Schedule the next recording */
 
-         if (switchPosition == AM_SWITCH_DEFAULT) {
+         if (switchPosition == AM_SWITCH_CUSTOM) {
 
-             /* Set parameters to start recording now */
+             scheduleRecording(currentTime, timeOfNextRecording, durationOfNextRecording);
+
+         }
+
+         /* Set parameters to start recording now */
+
+         if (switchPosition == AM_SWITCH_DEFAULT) {
 
              *timeOfNextRecording = currentTime;
 
-             *durationOfNextRecording = configSettings->disableSleepRecordCycle ? SECONDS_IN_DAY : configSettings->recordDuration;
-
-         } else if (switchPosition == AM_SWITCH_CUSTOM) {
-
-             /* Determine starting time and duration of next recording */
-
-             scheduleRecording(currentTime, timeOfNextRecording, durationOfNextRecording);
+             *durationOfNextRecording = UINT32_MAX;
 
          }
 
@@ -719,93 +727,95 @@ int main(void) {
 
         }
 
-        /* Measure battery voltage */
+        /* Reduce the recording duration if necessary */
 
-        uint32_t supplyVoltage = AudioMoth_getSupplyVoltage();
+        if (switchPosition == AM_SWITCH_CUSTOM) {
 
-        AM_extendedBatteryState_t extendedBatteryState = AudioMoth_getExtendedBatteryState(supplyVoltage);
+            uint32_t missedSeconds = MIN(currentTime - *timeOfNextRecording, *durationOfNextRecording);
 
-        /* Check if low voltage check is enabled and that the voltage is okay */
-
-        bool okayToMakeRecording = true;
-
-        if (configSettings->enableLowVoltageCutoff) {
-
-            AudioMoth_enableSupplyMonitor();
-
-            AudioMoth_setSupplyMonitorThreshold(MINIMUM_SUPPLY_VOLTAGE);
-
-            okayToMakeRecording = AudioMoth_isSupplyAboveThreshold();
+            *durationOfNextRecording -= missedSeconds;
 
         }
 
-        /* Make recording if okay */
+        /* Make the recording */
 
         AM_recordingState_t recordingState = RECORDING_OKAY;
 
-        if (okayToMakeRecording) {
+        if (*durationOfNextRecording > 0) {
 
-            AudioMoth_enableTemperature();
+            /* Measure battery voltage */
 
-            int32_t temperature = AudioMoth_getTemperature();
+            uint32_t supplyVoltage = AudioMoth_getSupplyVoltage();
 
-            AudioMoth_disableTemperature();
+            AM_extendedBatteryState_t extendedBatteryState = AudioMoth_getExtendedBatteryState(supplyVoltage);
 
-            if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem();
+            /* Check if low voltage check is enabled and that the voltage is okay */
 
-            if (fileSystemEnabled)  {
+            bool okayToMakeRecording = true;
 
-                recordingState = makeRecording(currentTime, *durationOfNextRecording, enableLED, extendedBatteryState, temperature);
+            if (configSettings->enableLowVoltageCutoff) {
 
-            } else {
+                AudioMoth_enableSupplyMonitor();
 
-                FLASH_LED(Both, LONG_LED_FLASH_DURATION);
+                AudioMoth_setSupplyMonitorThreshold(MINIMUM_SUPPLY_VOLTAGE);
 
-                recordingState = SDCARD_WRITE_ERROR;
+                okayToMakeRecording = AudioMoth_isSupplyAboveThreshold();
 
             }
 
-        } else if (enableLED) {
+            /* Make recording if okay */
 
-            FLASH_LED(Both, LONG_LED_FLASH_DURATION);
+            if (okayToMakeRecording) {
+
+                AudioMoth_enableTemperature();
+
+                int32_t temperature = AudioMoth_getTemperature();
+
+                AudioMoth_disableTemperature();
+
+                if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem();
+
+                if (fileSystemEnabled)  {
+
+                    recordingState = makeRecording(currentTime, *durationOfNextRecording, enableLED, extendedBatteryState, temperature);
+
+                } else {
+
+                    FLASH_LED(Both, LONG_LED_FLASH_DURATION);
+
+                    recordingState = SDCARD_WRITE_ERROR;
+
+                }
+
+            } else {
+
+                if (enableLED) FLASH_LED(Both, LONG_LED_FLASH_DURATION);
+
+                recordingState = SUPPLY_VOLTAGE_LOW;
+
+            }
+
+            /* Disable low voltage monitor if it was used */
+
+            if (configSettings->enableLowVoltageCutoff) AudioMoth_disableSupplyMonitor();
 
         }
 
-        /* Disable low voltage monitor if it was used */
+        /* Schedule next recording if recording did not end early due to the file size limit (otherwise restart immediately) */
 
-        if (configSettings->enableLowVoltageCutoff) AudioMoth_disableSupplyMonitor();
+        if (switchPosition == AM_SWITCH_CUSTOM && recordingState != FILE_SIZE_LIMITED) {
 
-        /* Schedule next recording */
+            scheduleRecording(currentTime + *durationOfNextRecording, timeOfNextRecording, durationOfNextRecording);
 
-		if (switchPosition == AM_SWITCH_DEFAULT) {
+        }
 
-			if (recordingState == RECORDING_OKAY) {
+        /* Use longer power-down period if an error has occurred (otherwise restart immediately) */
 
-			    /* Recording completed normally */
+        if (switchPosition == AM_SWITCH_DEFAULT && (recordingState == SDCARD_WRITE_ERROR || recordingState == SUPPLY_VOLTAGE_LOW)) {
 
-			    if (!configSettings->disableSleepRecordCycle) {
+            SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);
 
-			        /* Set time of next recording after sleep period */
-
-                    *timeOfNextRecording = currentTime + configSettings->recordDuration + configSettings->sleepDuration;
-
-		        }
-
-			} else {
-
-			    /* Power down with default wait period before trying again */
-
-			    SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);
-
-			}
-
-		} else {
-
-			/* Determine starting time and duration of next recording */
-
-			scheduleRecording(currentTime + *durationOfNextRecording, timeOfNextRecording, durationOfNextRecording);
-
-		}
+        }
 
     } else if (enableLED) {
 
@@ -1030,7 +1040,11 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     uint32_t numberOfSamplesInHeader = sizeof(wavHeader) / NUMBER_OF_BYTES_IN_SAMPLE;
 
-    uint32_t numberOfSamples = effectiveSampleRate * recordDuration;
+    uint32_t maximumNumberOfSeconds = (MAXIMUM_WAV_FILE_SIZE - sizeof(wavHeader)) / NUMBER_OF_BYTES_IN_SAMPLE / effectiveSampleRate;
+
+    bool fileSizeLimited = (recordDuration > maximumNumberOfSeconds);
+
+    uint32_t numberOfSamples = effectiveSampleRate * (fileSizeLimited ? maximumNumberOfSeconds : recordDuration);
 
     /* Initialise microphone for recording */
 
@@ -1052,11 +1066,11 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     struct tm *time = gmtime(&rawtime);
 
-    sprintf(fileName, "%04d%02d%02d_%02d%02d%02d", 1900 + time->tm_year, time->tm_mon + 1, time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec);
+    uint32_t length = sprintf(fileName, "%04d%02d%02d_%02d%02d%02d", 1900 + time->tm_year, time->tm_mon + 1, time->tm_mday, time->tm_hour, time->tm_min, time->tm_sec);
 
     char *extension = configSettings->amplitudeThreshold > 0 ? "T.WAV" : ".WAV";
 
-    strcpy(fileName + 15, extension);
+    strcpy(fileName + length, extension);
 
     FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_openFile(fileName));
 
@@ -1180,7 +1194,7 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     setHeaderDetails(&wavHeader, effectiveSampleRate, samplesWritten - numberOfSamplesInHeader - totalNumberOfCompressedSamples);
 
-    setHeaderComment(&wavHeader, currentTime, configSettings->timezoneHours, configSettings->timezoneMinutes, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain, extendedBatteryState, temperature, supplyVoltageLow, switchPositionChanged, configSettings->amplitudeThreshold, requestedFilterType, configSettings->lowerFilterFreq, configSettings->higherFilterFreq);
+    setHeaderComment(&wavHeader, currentTime, configSettings->timezoneHours, configSettings->timezoneMinutes, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, configSettings->gain, extendedBatteryState, temperature, switchPositionChanged, supplyVoltageLow, fileSizeLimited, configSettings->amplitudeThreshold, requestedFilterType, configSettings->lowerFilterFreq, configSettings->higherFilterFreq);
 
     /* Write the header */
 
@@ -1198,9 +1212,11 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     /* Return with state */
 
-    if (supplyVoltageLow) return VOLTAGE_CHECK;
-
     if (switchPositionChanged) return SWITCH_CHANGED;
+
+    if (supplyVoltageLow) return SUPPLY_VOLTAGE_LOW;
+
+    if (fileSizeLimited) return FILE_SIZE_LIMITED;
 
     return RECORDING_OKAY;
 
