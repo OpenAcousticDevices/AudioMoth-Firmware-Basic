@@ -44,7 +44,10 @@
 #define NUMBER_OF_BYTES_IN_SAMPLE           2
 #define EXTERNAL_SRAM_SIZE_IN_SAMPLES       (AM_EXTERNAL_SRAM_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE)
 #define NUMBER_OF_SAMPLES_IN_BUFFER         (EXTERNAL_SRAM_SIZE_IN_SAMPLES / NUMBER_OF_BUFFERS)
-#define NUMBER_OF_SAMPLES_IN_DMA_TRANSFER   1024
+
+/* DMA transfer constant */
+
+#define MAXIMUM_SAMPLES_IN_DMA_TRANSFER     1024
 
 /* Microphone warm-up constant */
 
@@ -541,6 +544,10 @@ static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_S
 
 static AM_filterType_t requestedFilterType;
 
+/* DMA transfer variable */
+
+static uint32_t numberOfSamplesInDMATransfer;
+
 /* SRAM buffer variables */
 
 static volatile uint32_t writeBuffer;
@@ -567,9 +574,9 @@ static volatile bool switchPositionChanged;
 
 /* DMA buffers */
 
-static int16_t primaryBuffer[NUMBER_OF_SAMPLES_IN_DMA_TRANSFER];
+static int16_t primaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
-static int16_t secondaryBuffer[NUMBER_OF_SAMPLES_IN_DMA_TRANSFER];
+static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Current recording file name */
 
@@ -577,7 +584,7 @@ static char fileName[32];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 4, 2};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 4, 4};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -809,9 +816,9 @@ int main(void) {
 
         }
 
-        /* Use longer power-down period if an error has occurred (otherwise restart immediately) */
+        /* Use longer power-down period if recording did not end normally or early due to the file size limit (otherwise restart immediately) */
 
-        if (switchPosition == AM_SWITCH_DEFAULT && (recordingState == SDCARD_WRITE_ERROR || recordingState == SUPPLY_VOLTAGE_LOW)) {
+        if (switchPosition == AM_SWITCH_DEFAULT && (recordingState == SUPPLY_VOLTAGE_LOW || recordingState == SWITCH_CHANGED || recordingState == SDCARD_WRITE_ERROR)) {
 
             SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);
 
@@ -870,13 +877,13 @@ inline void AudioMoth_handleDirectMemoryAccessInterrupt(bool isPrimaryBuffer, in
 
     /* Update the current buffer index and write buffer */
 
-    bool thresholdExceeded = DigitalFilter_filter(source, buffers[writeBuffer] + writeBufferIndex, configSettings->sampleRateDivider, NUMBER_OF_SAMPLES_IN_DMA_TRANSFER, configSettings->amplitudeThreshold);
+    bool thresholdExceeded = DigitalFilter_filter(source, buffers[writeBuffer] + writeBufferIndex, configSettings->sampleRateDivider, numberOfSamplesInDMATransfer, configSettings->amplitudeThreshold);
 
     if (dmaTransfersProcessed > dmaTransfersToSkip) {
 
         writeIndicator[writeBuffer] |= thresholdExceeded;
 
-        writeBufferIndex += NUMBER_OF_SAMPLES_IN_DMA_TRANSFER / configSettings->sampleRateDivider;
+        writeBufferIndex += numberOfSamplesInDMATransfer / configSettings->sampleRateDivider;
 
         if (writeBufferIndex == NUMBER_OF_SAMPLES_IN_BUFFER) {
 
@@ -1030,11 +1037,23 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     DigitalFilter_applyAdditionalGain(sampleMultiplier);
 
+    /* Calculate the number of samples in each DMA transfer */
+
+    numberOfSamplesInDMATransfer = MAXIMUM_SAMPLES_IN_DMA_TRANSFER / configSettings->sampleRateDivider;
+
+    while (numberOfSamplesInDMATransfer & (numberOfSamplesInDMATransfer - 1)) {
+
+        numberOfSamplesInDMATransfer = numberOfSamplesInDMATransfer & (numberOfSamplesInDMATransfer - 1);
+
+    }
+
+    numberOfSamplesInDMATransfer *= configSettings->sampleRateDivider;
+
     /* Set up the DMA transfers to skip */
 
     dmaTransfersProcessed = 0;
 
-    dmaTransfersToSkip = configSettings->sampleRate / FRACTION_OF_SECOND_FOR_WARMUP / NUMBER_OF_SAMPLES_IN_DMA_TRANSFER;
+    dmaTransfersToSkip = configSettings->sampleRate / FRACTION_OF_SECOND_FOR_WARMUP / numberOfSamplesInDMATransfer;
 
     /* Calculate recording parameters */
 
@@ -1052,7 +1071,7 @@ static AM_recordingState_t makeRecording(uint32_t currentTime, uint32_t recordDu
 
     AudioMoth_enableMicrophone(configSettings->gain, configSettings->clockDivider, configSettings->acquisitionCycles, configSettings->oversampleRate);
 
-    AudioMoth_initialiseDirectMemoryAccess(primaryBuffer, secondaryBuffer, NUMBER_OF_SAMPLES_IN_DMA_TRANSFER);
+    AudioMoth_initialiseDirectMemoryAccess(primaryBuffer, secondaryBuffer, numberOfSamplesInDMATransfer);
 
     AudioMoth_startMicrophoneSamples(configSettings->sampleRate);
 
