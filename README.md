@@ -7,7 +7,7 @@ Compatible with the [AudioMoth Configuration App](https://github.com/OpenAcousti
 
 Clone the contents of [AudioMoth-Project](https://github.com/OpenAcousticDevices/AudioMoth-Project).
 
-Replace ```src/main.c``` with this ```main.c``` from this repository. Put all the remaining ```.c``` in the ```/src/``` folder and all the ```.h``` in the ```/inc/``` folder. If building from the command line tools nothing else is required. However, if buildign using Simplicity Studio, open the project 'Properties' under the 'File' menu, navigate to the 'Linker' and 'Ordering' and make sure that the standard math library '-lm' is at the bottom of the list.
+Replace ```src/main.c``` with this ```main.c``` from this repository. Put all the remaining ```.c``` in the ```/src/``` folder and all the ```.h``` in the ```/inc/``` folder. If building from the command line tools no further changes are necessary. However, if building using Simplicity Studio, open the project 'Properties' under the 'File' menu, navigate to the 'Linker' and 'Ordering' and make sure that the standard math library '-lm' is at the bottom of the list.
 
 ### Documentation ####
 
