@@ -200,7 +200,7 @@ static bool filter(int16_t *source, int16_t *dest, uint32_t sampleRateDivider, u
 
 }
 
-/* Fast filter routing for 256khz and 384kHz */
+/* Fast filter routine for when 250kHz and 384kHz and sampleRateDivider is not needed */
 
 static bool fastFilter(int16_t *source, int16_t *dest, uint32_t size, uint16_t amplitudeThreshold) {
 

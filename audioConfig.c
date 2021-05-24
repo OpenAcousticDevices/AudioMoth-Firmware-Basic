@@ -421,7 +421,7 @@ bool AudioConfig_listenForAudioConfigurationPackets(bool timeout, uint32_t milli
 
             if (counter % PULSE_INTERVAL == 0) AudioConfig_handleAudioConfigurationEvent(AC_EVENT_PULSE);
 
-            /* Update the Kostas loop with new sample */
+            /* Update the Costas loop with new sample */
 
             float costasLoopOutput = updateCostasLoop((float)configSample);
 
