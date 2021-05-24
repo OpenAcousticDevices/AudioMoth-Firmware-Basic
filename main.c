@@ -1651,8 +1651,6 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     uint32_t sampleRateTimeOffset = ROUNDED_DIV(numberOfSamplesInHeader * MILLISECONDS_IN_SECOND, effectiveSampleRate);
 
-    sampleRateTimeOffset -= ROUNDED_DIV(numberOfSamplesInDMATransfer * MILLISECONDS_IN_SECOND, 2 * configSettings->sampleRate);
-
     /* Calculate time until the recording should start */
 
     int64_t millisecondsUntilRecordingShouldStart = (int64_t)timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)*fileOpenTime * MILLISECONDS_IN_SECOND - (int64_t)*fileOpenMilliseconds - (int64_t)sampleRateTimeOffset;
