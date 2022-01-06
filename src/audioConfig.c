@@ -13,7 +13,8 @@
 
 #define CONFIG_SAMPLE_RATE                  48000
 #define CONFIG_OVERSAMPLE_RATE              8
-#define CONFIG_GAIN                         4
+#define CONFIG_GAIN                         AM_GAIN_HIGH
+#define CONFIG_GAIN_RANGE                   AM_NORMAL_GAIN_RANGE
 #define CONFIG_ACQUISITION_CYCLES           16
 #define CONFIG_CLOCK_DIVIDER                4
 
@@ -269,7 +270,7 @@ void AudioConfig_enableAudioConfiguration() {
 
     /* Initialise microphone for configuration */
 
-    AudioMoth_enableMicrophone(CONFIG_GAIN, CONFIG_CLOCK_DIVIDER, CONFIG_ACQUISITION_CYCLES, CONFIG_OVERSAMPLE_RATE);
+    AudioMoth_enableMicrophone(CONFIG_GAIN_RANGE, CONFIG_GAIN, CONFIG_CLOCK_DIVIDER, CONFIG_ACQUISITION_CYCLES, CONFIG_OVERSAMPLE_RATE);
 
     AudioMoth_startMicrophoneSamples(CONFIG_SAMPLE_RATE);
 
@@ -325,6 +326,8 @@ bool AudioConfig_listenForAudioConfigurationTone(uint32_t milliseconds) {
 
     uint32_t counter = 0;
 
+    bool hasInvertedOutput = AudioMoth_hasInvertedOutput();
+
     uint32_t maximumCounter = MIN(milliseconds, MAXIMUM_LISTENING_MILLISECONDS) * CONFIG_SAMPLE_RATE / MILLISECONDS_IN_SECOND;
 
     while (cancel == false && counter < maximumCounter) {
@@ -333,7 +336,11 @@ bool AudioConfig_listenForAudioConfigurationTone(uint32_t milliseconds) {
 
             /* Update the Costas loop with new sample */
 
-            float costasLoopOutput = updateCostasLoop((float)configSample);
+            float sample = (float)configSample;
+
+            if (hasInvertedOutput) sample = -sample;
+
+            float costasLoopOutput = updateCostasLoop(sample);
 
             /* Check thresholds */
 

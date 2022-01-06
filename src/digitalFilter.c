@@ -132,7 +132,7 @@ static inline float applyBandPassFilter(float sample) {
 
 }
 
-static inline void writeFilteredOutput(int16_t *dest, uint32_t index, float filterOutput, bool *exceededApplitudeThreshold, uint32_t amplitudeThreshold) {
+static inline void writeFilteredOutput(int16_t *dest, uint32_t index, float filterOutput, bool *exceededAmplitudeThreshold, uint32_t amplitudeThreshold) {
 
     /* Apply output range limits */
 
@@ -150,7 +150,7 @@ static inline void writeFilteredOutput(int16_t *dest, uint32_t index, float filt
 
     if (fabsf(filterOutput) >= amplitudeThreshold) {
 
-        *exceededApplitudeThreshold = true;
+        *exceededAmplitudeThreshold = true;
 
     }
 
@@ -166,7 +166,7 @@ static bool filter(int16_t *source, int16_t *dest, uint32_t sampleRateDivider, u
 
     uint32_t index = 0;
 
-    bool exceededApplitudeThreshold = false;
+    bool exceededAmplitudeThreshold = false;
 
     for (uint32_t i = 0; i < size; i += sampleRateDivider) {
 
@@ -190,13 +190,13 @@ static bool filter(int16_t *source, int16_t *dest, uint32_t sampleRateDivider, u
 
         }
 
-        writeFilteredOutput(dest, index, filterOutput, &exceededApplitudeThreshold, amplitudeThreshold);
+        writeFilteredOutput(dest, index, filterOutput, &exceededAmplitudeThreshold, amplitudeThreshold);
 
         index += 1;
 
     }
 
-    return exceededApplitudeThreshold;
+    return exceededAmplitudeThreshold;
 
 }
 

@@ -11,111 +11,126 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "gps.h"
 #include "audioMoth.h"
 #include "audioConfig.h"
 #include "digitalFilter.h"
 
 /* Useful time constants */
 
-#define MILLISECONDS_IN_SECOND              1000
+#define MILLISECONDS_IN_SECOND                  1000
 
-#define SECONDS_IN_MINUTE                   60
-#define SECONDS_IN_HOUR                     (60 * SECONDS_IN_MINUTE)
-#define SECONDS_IN_DAY                      (24 * SECONDS_IN_HOUR)
+#define SECONDS_IN_MINUTE                       60
+#define SECONDS_IN_HOUR                         (60 * SECONDS_IN_MINUTE)
+#define SECONDS_IN_DAY                          (24 * SECONDS_IN_HOUR)
 
 /* Useful type constants */
 
-#define BITS_PER_BYTE                       8
-#define UINT32_SIZE_IN_BITS                 32
-#define UINT32_SIZE_IN_BYTES                4
-#define UINT16_SIZE_IN_BYTES                2
+#define BITS_PER_BYTE                           8
+#define UINT32_SIZE_IN_BITS                     32
+#define UINT32_SIZE_IN_BYTES                    4
+#define UINT16_SIZE_IN_BYTES                    2
 
 /* Sleep and LED constants */
 
-#define LOW_BATTERY_LED_FLASHES             10
+#define LOW_BATTERY_LED_FLASHES                 10
 
-#define SHORT_LED_FLASH_DURATION            100
-#define LONG_LED_FLASH_DURATION             500
+#define SHORT_LED_FLASH_DURATION                100
+#define LONG_LED_FLASH_DURATION                 500
 
-#define WAITING_LED_FLASH_DURATION          10
-#define WAITING_LED_FLASH_INTERVAL          2000
+#define WAITING_LED_FLASH_DURATION              10
+#define WAITING_LED_FLASH_INTERVAL              2000
 
-#define DEFAULT_WAIT_INTERVAL               1000
+#define DEFAULT_WAIT_INTERVAL                   1000
 
 /* SRAM buffer constants */
 
-#define NUMBER_OF_BUFFERS                   8
-#define NUMBER_OF_BYTES_IN_SAMPLE           2
-#define EXTERNAL_SRAM_SIZE_IN_SAMPLES       (AM_EXTERNAL_SRAM_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE)
-#define NUMBER_OF_SAMPLES_IN_BUFFER         (EXTERNAL_SRAM_SIZE_IN_SAMPLES / NUMBER_OF_BUFFERS)
+#define NUMBER_OF_BUFFERS                       8
+#define NUMBER_OF_BYTES_IN_SAMPLE               2
+#define EXTERNAL_SRAM_SIZE_IN_SAMPLES           (AM_EXTERNAL_SRAM_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE)
+#define NUMBER_OF_SAMPLES_IN_BUFFER             (EXTERNAL_SRAM_SIZE_IN_SAMPLES / NUMBER_OF_BUFFERS)
 
 /* DMA transfer constant */
 
-#define MAXIMUM_SAMPLES_IN_DMA_TRANSFER     1024
+#define MAXIMUM_SAMPLES_IN_DMA_TRANSFER         1024
 
 /* Compression constants */
 
-#define COMPRESSION_BUFFER_SIZE_IN_BYTES    512
+#define COMPRESSION_BUFFER_SIZE_IN_BYTES        512
 
 /* File size constants */
 
-#define MAXIMUM_FILE_NAME_LENGTH            32
+#define MAXIMUM_FILE_NAME_LENGTH                32
 
-#define MAXIMUM_WAV_FILE_SIZE               (UINT32_MAX - 1)
+#define MAXIMUM_WAV_FILE_SIZE                   (UINT32_MAX - 1)
 
 /* WAV header constant */
 
-#define PCM_FORMAT                          1
-#define RIFF_ID_LENGTH                      4
-#define LENGTH_OF_ARTIST                    32
-#define LENGTH_OF_COMMENT                   384
+#define PCM_FORMAT                              1
+#define RIFF_ID_LENGTH                          4
+#define LENGTH_OF_ARTIST                        32
+#define LENGTH_OF_COMMENT                       384
 
 /* USB configuration constant */
 
-#define MAX_START_STOP_PERIODS              5
+#define MAX_START_STOP_PERIODS                  5
 
 /* Digital filter constant */
 
-#define FILTER_FREQ_MULTIPLIER              100
+#define FILTER_FREQ_MULTIPLIER                  100
 
-/* DC filter constant */
+/* DC filter constants */
 
-#define LOW_DC_BLOCKING_FREQ                8
-#define DEFAULT_DC_BLOCKING_FREQ            48
+#define LOW_DC_BLOCKING_FREQ                    8
+#define DEFAULT_DC_BLOCKING_FREQ                48
 
 /* Supply monitor constant */
 
-#define MINIMUM_SUPPLY_VOLTAGE              2800
+#define MINIMUM_SUPPLY_VOLTAGE                  2800
 
 /* Deployment ID constant */
 
-#define DEPLOYMENT_ID_LENGTH                8
+#define DEPLOYMENT_ID_LENGTH                    8
 
 /* Audio configuration constants */
 
-#define AUDIO_CONFIG_PULSE_INTERVAL         10
-#define AUDIO_CONFIG_TIME_CORRECTION        134
-#define AUDIO_CONFIG_TONE_TIMEOUT           250
-#define AUDIO_CONFIG_PACKETS_TIMEOUT        30000
+#define AUDIO_CONFIG_PULSE_INTERVAL             10
+#define AUDIO_CONFIG_TIME_CORRECTION            134
+#define AUDIO_CONFIG_TONE_TIMEOUT               250
+#define AUDIO_CONFIG_PACKETS_TIMEOUT            30000
+
+/* GPS time setting constants */
+
+#define GPS_MAXIMUM_MS_DIFFERENCE               (SECONDS_IN_HOUR * MILLISECONDS_IN_SECOND)
+#define GPS_MAX_TIME_SETTING_PERIOD             300
+#define GPS_MIN_TIME_SETTING_PERIOD             30
+#define GPS_FREQUENCY_PRECISION                 1000
+#define GPS_FILENAME                            "GPS.TXT"
+
+/* Magnetic switch constants */
+
+#define MAGNETIC_SWITCH_FLASH_MODULO            2
+
+#define MAGNETIC_SWITCH_CHANGE_FLASHES          10
 
 /* USB configuration constant */
 
-#define USB_CONFIG_TIME_CORRECTION          26
+#define USB_CONFIG_TIME_CORRECTION              26
 
 /* EM4 wake constant */
 
-#define EM4_WAKEUP_PERIOD                   43
+#define EM4_WAKEUP_PERIOD                       43
 
 /* Recording preparation constants */
 
-#define PREPARATION_PERIOD_INCREMENT        250
-#define INITIAL_PREPARATION_PERIOD          2000
-#define MINIMUM_PREPARATION_PERIOD          1000
-#define MAXIMUM_PREPARATION_PERIOD          30000
+#define PREPARATION_PERIOD_INCREMENT            250
+#define INITIAL_PREPARATION_PERIOD              2000
+#define MINIMUM_PREPARATION_PERIOD              1000
+#define MAXIMUM_PREPARATION_PERIOD              30000
 
 /* Energy saver mode constant */
 
-#define ENERGY_SAVER_SAMPLE_RATE_THRESHOLD  48000
+#define ENERGY_SAVER_SAMPLE_RATE_THRESHOLD      48000
 
 /* Useful macros */
 
@@ -163,7 +178,7 @@
 
 /* Recording state enumeration */
 
-typedef enum {RECORDING_OKAY, FILE_SIZE_LIMITED, SUPPLY_VOLTAGE_LOW, SWITCH_CHANGED, MICROPHONE_CHANGED, SDCARD_WRITE_ERROR} AM_recordingState_t;
+typedef enum {RECORDING_OKAY, FILE_SIZE_LIMITED, SUPPLY_VOLTAGE_LOW, SWITCH_CHANGED, MICROPHONE_CHANGED, MAGNETIC_SWITCH, SDCARD_WRITE_ERROR} AM_recordingState_t;
 
 /* Filter type enumeration */
 
@@ -238,7 +253,7 @@ typedef struct {
 
 typedef struct {
     uint32_t time;
-    uint8_t gain;
+    AM_gainSetting_t gain;
     uint8_t clockDivider;
     uint8_t acquisitionCycles;
     uint8_t oversampleRate;
@@ -269,13 +284,16 @@ typedef struct {
     int8_t amplitudeThresholdPercentageExponent : 3; 
     uint8_t enableEnergySaverMode : 1; 
     uint8_t disable48HzDCBlockingFilter : 1;
+    uint8_t enableTimeSettingFromGPS : 1;
+    uint8_t enableMagneticSwitch : 1;
+    uint8_t enableLowGainRange : 1;
 } configSettings_t;
 
 #pragma pack(pop)
 
 static const configSettings_t defaultConfigSettings = {
     .time = 0,
-    .gain = 2,
+    .gain = AM_GAIN_MEDIUM,
     .clockDivider = 4,
     .acquisitionCycles = 16,
     .oversampleRate = 1,
@@ -286,11 +304,11 @@ static const configSettings_t defaultConfigSettings = {
     .enableLED = 1,
     .activeStartStopPeriods = 1,
     .startStopPeriods = {
-        {.startMinutes = 000, .stopMinutes = 1440},
-        {.startMinutes = 000, .stopMinutes = 1440},
-        {.startMinutes = 000, .stopMinutes = 1440},
-        {.startMinutes = 000, .stopMinutes = 1440},
-        {.startMinutes = 000, .stopMinutes = 1440}
+        {.startMinutes = 0, .stopMinutes = 1440},
+        {.startMinutes = 0, .stopMinutes = 1440},
+        {.startMinutes = 0, .stopMinutes = 1440},
+        {.startMinutes = 0, .stopMinutes = 1440},
+        {.startMinutes = 0, .stopMinutes = 1440}
     },
     .timezoneHours = 0,
     .enableLowVoltageCutoff = 1,
@@ -311,7 +329,10 @@ static const configSettings_t defaultConfigSettings = {
     .amplitudeThresholdPercentageMantissa = 0,
     .amplitudeThresholdPercentageExponent = 0,
     .enableEnergySaverMode = 0,
-    .disable48HzDCBlockingFilter = 0
+    .disable48HzDCBlockingFilter = 0,
+    .enableTimeSettingFromGPS = 0,
+    .enableMagneticSwitch = 0,
+    .enableLowGainRange = 0
 };
 
 /* Persistent configuration data structure */
@@ -439,7 +460,7 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
         uint32_t batteryVoltage =  extendedBatteryState + AM_EXT_BAT_STATE_OFFSET / AM_BATTERY_STATE_INCREMENT;
 
-        comment += sprintf(comment, "%01ld.%01ldV", batteryVoltage / 10, batteryVoltage % 10);
+        comment += sprintf(comment, "%01lu.%01luV", batteryVoltage / 10, batteryVoltage % 10);
 
     }
 
@@ -447,7 +468,7 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
     uint32_t temperatureInDecidegrees = ROUNDED_DIV(ABS(temperature), 100);
 
-    comment += sprintf(comment, " and temperature was %s%ld.%ldC.", sign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
+    comment += sprintf(comment, " and temperature was %s%lu.%luC.", sign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
     
     bool amplitudeThresholdEnabled = configSettings->amplitudeThreshold > 0 || configSettings->enableAmplitudeThresholdDecibelScale || configSettings->enableAmplitudeThresholdPercentageScale;
 
@@ -463,11 +484,11 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
     } else if (amplitudeThresholdEnabled) {
 
-        comment += sprintf(comment, "%d", configSettings->amplitudeThreshold);
+        comment += sprintf(comment, "%u", configSettings->amplitudeThreshold);
 
     }
 
-    if (amplitudeThresholdEnabled) comment += sprintf(comment, " with %ds minimum trigger duration.", configSettings->minimumTriggerDuration);
+    if (amplitudeThresholdEnabled) comment += sprintf(comment, " with %us minimum trigger duration.", configSettings->minimumTriggerDuration);
 
     uint16_t lowerFilterFreq = configSettings->lowerFilterFreq;
 
@@ -475,37 +496,41 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
     if (filterType == LOW_PASS_FILTER) {
 
-        comment += sprintf(comment, " Low-pass filter with frequency of %01d.%01dkHz applied.", higherFilterFreq / 10, higherFilterFreq % 10);
+        comment += sprintf(comment, " Low-pass filter with frequency of %01u.%01ukHz applied.", higherFilterFreq / 10, higherFilterFreq % 10);
 
     } else if (filterType == BAND_PASS_FILTER) {
 
-        comment += sprintf(comment, " Band-pass filter with frequencies of %01d.%01dkHz and %01d.%01dkHz applied.", lowerFilterFreq / 10, lowerFilterFreq % 10, higherFilterFreq / 10, higherFilterFreq % 10);
+        comment += sprintf(comment, " Band-pass filter with frequencies of %01u.%01ukHz and %01u.%01ukHz applied.", lowerFilterFreq / 10, lowerFilterFreq % 10, higherFilterFreq / 10, higherFilterFreq % 10);
 
     } else if (filterType == HIGH_PASS_FILTER) {
 
-        comment += sprintf(comment, " High-pass filter with frequency of %01d.%01dkHz applied.", lowerFilterFreq / 10, lowerFilterFreq % 10);
+        comment += sprintf(comment, " High-pass filter with frequency of %01u.%01ukHz applied.", lowerFilterFreq / 10, lowerFilterFreq % 10);
 
     }
 
     if (recordingState != RECORDING_OKAY) {
 
-        comment += sprintf(comment, " Recording stopped due to ");
+        comment += sprintf(comment, " Recording stopped");
 
         if (recordingState == MICROPHONE_CHANGED) {
 
-            comment += sprintf(comment, "microphone change.");
+            comment += sprintf(comment, " due to microphone change.");
 
         } else if (recordingState == SWITCH_CHANGED) {
 
-            comment += sprintf(comment, "switch position change.");
+            comment += sprintf(comment, " due to switch position change.");
+
+        } else if (recordingState == MAGNETIC_SWITCH) {
+        
+            comment += sprintf(comment, " by magnetic switch.");
 
         } else if (recordingState == SUPPLY_VOLTAGE_LOW) {
 
-            comment += sprintf(comment, "low voltage.");
+            comment += sprintf(comment, " due to low voltage.");
 
         } else if (recordingState == FILE_SIZE_LIMITED) {
 
-            comment += sprintf(comment, "file size limit.");
+            comment += sprintf(comment, " due to file size limit.");
 
         }
 
@@ -525,7 +550,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     length = sprintf(configBuffer, "Device ID                       : " SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(serialNumber));
 
-    length += sprintf(configBuffer + length, "Firmware                        : %s (%d.%d.%d)\n\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
+    length += sprintf(configBuffer + length, "Firmware                        : %s (%u.%u.%u)\n\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
 
     if (memcmp(deploymentID, defaultDeploymentID, DEPLOYMENT_ID_LENGTH)) {
 
@@ -557,7 +582,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\n\nSample rate (Hz)                : %ld\n", configSettings->sampleRate / configSettings->sampleRateDivider);
+    length = sprintf(configBuffer, "\n\nSample rate (Hz)                : %lu\n", configSettings->sampleRate / configSettings->sampleRateDivider);
 
     static char *gainSettings[5] = {"Low", "Low-Medium", "Medium", "Medium-High", "High"};
 
@@ -571,7 +596,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     } else {
 
-        length += sprintf(configBuffer + length, "%d", configSettings->sleepDuration);
+        length += sprintf(configBuffer + length, "%u", configSettings->sleepDuration);
 
     }
 
@@ -583,13 +608,13 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     } else {
 
-        length += sprintf(configBuffer + length, "%d", configSettings->recordDuration);
+        length += sprintf(configBuffer + length, "%u", configSettings->recordDuration);
 
     }
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\n\nActive recording periods        : %d\n", configSettings->activeStartStopPeriods);
+    length = sprintf(configBuffer, "\n\nActive recording periods        : %u\n", configSettings->activeStartStopPeriods);
 
     for (uint32_t i = 0; i < configSettings->activeStartStopPeriods; i += 1) {
 
@@ -599,7 +624,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
         if (i == 0) length += sprintf(configBuffer + length, "\n");
 
-        length += sprintf(configBuffer + length, "Recording period %ld              : %02ld:%02ld - %02ld:%02ld (UTC)\n", i + 1, startMinutes / 60, startMinutes % 60, stopMinutes / 60, stopMinutes % 60);
+        length += sprintf(configBuffer + length, "Recording period %lu              : %02lu:%02lu - %02lu:%02lu (UTC)\n", i + 1, startMinutes / 60, startMinutes % 60, stopMinutes / 60, stopMinutes % 60);
 
     }
 
@@ -645,15 +670,15 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     } else if (configSettings->lowerFilterFreq == UINT16_MAX) {
 
-        length += sprintf(configBuffer + length, "Low-pass (%d.%dkHz)", configSettings->higherFilterFreq / 10, configSettings->higherFilterFreq % 10);
+        length += sprintf(configBuffer + length, "Low-pass (%u.%ukHz)", configSettings->higherFilterFreq / 10, configSettings->higherFilterFreq % 10);
 
     } else if (configSettings->higherFilterFreq == UINT16_MAX) {
 
-        length += sprintf(configBuffer + length, "High-pass (%d.%dkHz)", configSettings->lowerFilterFreq / 10, configSettings->lowerFilterFreq % 10);
+        length += sprintf(configBuffer + length, "High-pass (%u.%ukHz)", configSettings->lowerFilterFreq / 10, configSettings->lowerFilterFreq % 10);
 
     } else {
 
-        length += sprintf(configBuffer + length, "Band-pass (%d.%dkHz - %d.%dkHz)", configSettings->lowerFilterFreq / 10, configSettings->lowerFilterFreq % 10, configSettings->higherFilterFreq / 10, configSettings->higherFilterFreq % 10);
+        length += sprintf(configBuffer + length, "Band-pass (%u.%ukHz - %u.%ukHz)", configSettings->lowerFilterFreq / 10, configSettings->lowerFilterFreq % 10, configSettings->higherFilterFreq / 10, configSettings->higherFilterFreq % 10);
 
     }
 
@@ -671,7 +696,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     } else if (amplitudeThresholdEnabled) {
 
-        length += sprintf(configBuffer + length, "%d", configSettings->amplitudeThreshold);
+        length += sprintf(configBuffer + length, "%u", configSettings->amplitudeThreshold);
 
     } else {
 
@@ -683,7 +708,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     if (amplitudeThresholdEnabled) {
 
-        length += sprintf(configBuffer + length, "%d", configSettings->minimumTriggerDuration);
+        length += sprintf(configBuffer + length, "%u", configSettings->minimumTriggerDuration);
 
     } else {
 
@@ -705,6 +730,12 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     length += sprintf(configBuffer + length, "Enable energy saver mode        : %s\n", configSettings->enableEnergySaverMode ? "Yes" : "No");
 
+    length += sprintf(configBuffer + length, "Enable low gain range           : %s\n\n", configSettings->enableLowGainRange ? "Yes" : "No");
+
+    length += sprintf(configBuffer + length, "Enable magnetic switch          : %s\n", configSettings->enableMagneticSwitch ? "Yes" : "No");
+
+    length += sprintf(configBuffer + length, "Enable GPS time setting         : %s\n", configSettings->enableTimeSettingFromGPS ? "Yes" : "No");
+
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
     RETURN_BOOL_ON_ERROR(AudioMoth_closeFile());
@@ -721,17 +752,25 @@ static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRES
 
 static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
 
-static uint32_t *writtenConfigurationToFile = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
+static uint32_t *timeOfNextGPSTimeSetting = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
 
-static uint8_t *deploymentID = (uint8_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
+static uint32_t *writtenConfigurationToFile = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
 
-static uint32_t *readyToMakeRecordings = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 24);
+static uint8_t *deploymentID = (uint8_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
 
-static uint32_t *recordingErrorHasOccurred = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 28);
+static uint32_t *readyToMakeRecordings = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 28);
 
-static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
+static uint32_t *shouldSetTimeFromGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
 
-static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+static uint32_t *recordingErrorHasOccurred = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+
+static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
+
+static uint32_t *magneticSwitchWaitingCounter = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
+
+static uint32_t *waitingForMagneticSwitch = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
+
+static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
 
 /* Filter variables */
 
@@ -739,7 +778,7 @@ static AM_filterType_t requestedFilterType;
 
 /* DMA transfer variable */
 
-static uint32_t numberOfSamplesInDMATransfer;
+static uint32_t numberOfRawSamplesInDMATransfer;
 
 /* SRAM buffer variables */
 
@@ -751,13 +790,31 @@ static int16_t* buffers[NUMBER_OF_BUFFERS];
 
 /* Flag to start processing DMA transfers */
 
-static volatile bool shouldProcessTransfers;
+static volatile uint32_t numberOfDMATransfers;
+
+static volatile uint32_t numberOfDMATransfersToWait;
 
 /* Compression buffers */
 
 static bool writeIndicator[NUMBER_OF_BUFFERS];
 
 static int16_t compressionBuffer[COMPRESSION_BUFFER_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE];
+
+/* GPS fix variables */
+
+static bool gpsEnableLED;
+
+static bool gpsPPSEvent;
+
+static bool gpsFixEvent;
+
+static bool gpsMessageEvent;
+
+static bool gpsFirstMessageReceived;
+
+static uint32_t gpsTickEventCount = 1;
+
+static uint32_t gpsTickEventModulo = GPS_TICK_EVENTS_PER_SECOND;
 
 /* Audio configuration variables */
 
@@ -779,6 +836,8 @@ static uint8_t defaultDeploymentID[DEPLOYMENT_ID_LENGTH];
 
 /* Recording state */
 
+static volatile bool magneticSwitch;
+
 static volatile bool microphoneChanged;
 
 static volatile bool switchPositionChanged;
@@ -791,7 +850,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 6, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 7, 0};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -799,7 +858,7 @@ static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-
 
 static void flashLedToIndicateBatteryLife(void);
 
-static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording);
+static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *timeOfNextGPSTimeSetting);
 
 static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t recordDuration, bool enableLED, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature, uint32_t *fileOpenTime, uint32_t *fileOpenMilliseconds);
 
@@ -837,6 +896,78 @@ static bool isEnergySaverMode(configSettings_t *configSettings) {
 
 }
 
+/* GPS time setting functions */
+
+static void writeGPSLogMessage(uint32_t time, uint32_t milliseconds, char *message) {
+
+    static char logBuffer[256];
+
+    time_t rawTime = time;
+
+    struct tm *tm = gmtime(&rawTime);
+
+    uint32_t length = sprintf(logBuffer, "%02d/%02d/%04d %02d:%02d:%02d.%03ld UTC: %s\n", tm->tm_mday, tm->tm_mon + 1, tm->tm_year + 1900, tm->tm_hour, tm->tm_min, tm->tm_sec, milliseconds, message);
+
+    AudioMoth_writeToFile(logBuffer, length);
+
+}
+
+static GPS_fixResult_t setTimeFromGPS(bool enableLED, uint32_t timeout) {
+
+    uint32_t currentTime, currentMilliseconds;
+
+    /* Enable GPS */
+
+    GPS_powerUpGPS();
+
+    GPS_enableGPSInterface();
+
+    /* Enable GPS log file */
+
+    bool success = AudioMoth_appendFile(GPS_FILENAME);
+
+    /* Add power up message */
+
+    AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS powered up.");
+
+    /* Set green LED and enter routine */
+
+    gpsEnableLED = enableLED;
+
+    if (gpsEnableLED) AudioMoth_setGreenLED(true);
+
+    GPS_fixResult_t result = GPS_setTimeFromGPS(timeout);
+
+    AudioMoth_setGreenLED(false);
+
+    AudioMoth_setRedLED(false);
+
+    /* Disable the GPS */
+
+    GPS_disableGPSInterface();
+
+    GPS_powerDownGPS();
+
+    /* Add result message */
+
+    AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+    if (result == GPS_CANCELLED_BY_MAGNETIC_SWITCH) writeGPSLogMessage(currentTime, currentMilliseconds, "Time was not updated. Cancelled by magnetic switch.");
+ 
+    if (result == GPS_CANCELLED_BY_SWITCH) writeGPSLogMessage(currentTime, currentMilliseconds, "Time was not updated. Cancelled by switch position change.");
+
+    if (result == GPS_TIMEOUT) writeGPSLogMessage(currentTime, currentMilliseconds, "Time was not updated. Timed out.");
+
+    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS powered down.\n");
+
+    if (success) AudioMoth_closeFile();
+
+    return result;
+
+}
+
 /* Main function */
 
 int main(void) {
@@ -848,20 +979,36 @@ int main(void) {
     AM_switchPosition_t switchPosition = AudioMoth_getSwitchPosition();
 
     if (AudioMoth_isInitialPowerUp()) {
+        
+        /* Initialise recording schedule variables */
 
         *timeOfNextRecording = 0;
 
         *durationOfNextRecording = UINT32_MAX;
 
+        *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+        /* Initialise configuration writing variable */
+
         *writtenConfigurationToFile = false;
 
+        /* Initialise recording state variables */
+
         *previousSwitchPosition = AM_SWITCH_NONE;
+
+        *shouldSetTimeFromGPS = false;
 
         *readyToMakeRecordings = false;
 
         *recordingErrorHasOccurred = false;
 
         *recordingPreparationPeriod = INITIAL_PREPARATION_PERIOD;
+
+        /* Initialise magentic switch state variables */
+
+        *magneticSwitchWaitingCounter = 0;
+
+        *waitingForMagneticSwitch = false;
 
         /* Copy default deployment ID */
 
@@ -915,6 +1062,10 @@ int main(void) {
 
     if (switchPosition != *previousSwitchPosition) {
 
+        /* Reset the GPS flag */
+
+        *shouldSetTimeFromGPS = false;
+
         /* Check there are active recording periods if the switch is in CUSTOM position */
 
         *readyToMakeRecordings = switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && configSettings->activeStartStopPeriods > 0);
@@ -923,7 +1074,21 @@ int main(void) {
 
         if (*readyToMakeRecordings) {
 
+            /* Determine if acoustic configuration is required */
+
             bool shouldPerformAcousticConfiguration = switchPosition == AM_SWITCH_CUSTOM && (AudioMoth_hasTimeBeenSet() == false || configSettings->requireAcousticConfiguration);
+
+            /* Overrule this decision if setting of time from GPS is enabled and acoustic configuration not enforced */
+
+            if (shouldPerformAcousticConfiguration && configSettings->enableTimeSettingFromGPS && configSettings->requireAcousticConfiguration == false) {
+
+                shouldPerformAcousticConfiguration = false;
+
+                *shouldSetTimeFromGPS = true;
+
+            }
+
+            /* Determine whether to listen for the acoustic tone */
 
             bool listenForAcousticTone = shouldPerformAcousticConfiguration == false && switchPosition == AM_SWITCH_CUSTOM;
 
@@ -938,6 +1103,7 @@ int main(void) {
             if (shouldPerformAcousticConfiguration) {
 
                 AudioMoth_setRedLED(true);
+
                 AudioMoth_setGreenLED(false);
 
                 audioConfigPulseCounter = 0;
@@ -960,16 +1126,18 @@ int main(void) {
 
                 if (acousticConfigurationPerformed) {
 
-                    /* Ready to make a recording */
+                    /* Cancel any previous requirement to use the GPS */
 
-                    *readyToMakeRecordings = true;
+                    *shouldSetTimeFromGPS = false;
 
                     /* Indicate success with LED flashes */
 
                     AudioMoth_setRedLED(false);
+
                     AudioMoth_setGreenLED(true);
 
                     AudioMoth_delay(1000);
+                    
                     AudioMoth_delay(1000);
 
                     AudioMoth_setGreenLED(false);
@@ -978,19 +1146,15 @@ int main(void) {
 
                 } else if (listenForAcousticTone && timedOut) {
 
-                    /* Ready to make a recording */
-
-                    *readyToMakeRecordings = true;
-
                     /* Turn off LED */
 
                     AudioMoth_setBothLED(false);
 
                 } else {
 
-                    /* Not ready to make a recording */
+                    /* Not ready to make a recording unless GPS is to be used */
 
-                    *readyToMakeRecordings = false;
+                    *readyToMakeRecordings = *shouldSetTimeFromGPS;
 
                     /* Turn off LED */
 
@@ -1032,9 +1196,23 @@ int main(void) {
 
             /* Try to write configuration to file */
 
-            if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem();
+            fileSystemEnabled = AudioMoth_enableFileSystem();
 
             if (fileSystemEnabled) writtenConfigurationToFileInThisSession = writeConfigurationToFile(configSettings, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+            /* Write the GPS log file */
+            
+            if (fileSystemEnabled && configSettings->enableTimeSettingFromGPS) {
+
+                AudioMoth_appendFile(GPS_FILENAME);
+
+                AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+                writeGPSLogMessage(currentTime, currentMilliseconds, "Switched to CUSTOM mode.\n");
+
+                AudioMoth_closeFile();
+
+            }
 
             /* Update the time and calculate earliest schedule start time */
 
@@ -1046,11 +1224,29 @@ int main(void) {
 
             if (switchPosition == AM_SWITCH_CUSTOM) {
 
-                scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording);
+                if (configSettings->enableMagneticSwitch) {
+
+                    *timeOfNextRecording = UINT32_MAX;
+
+                    *durationOfNextRecording = UINT32_MAX;
+
+                    *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+                    *magneticSwitchWaitingCounter = 0;
+
+                    *waitingForMagneticSwitch = true;
+
+                } else {
+
+                    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+
+                    *waitingForMagneticSwitch = false;
+
+                }
 
             }
 
-             /* Set parameters to start recording now */
+            /* Set parameters to start recording now */
 
             if (switchPosition == AM_SWITCH_DEFAULT) {
 
@@ -1058,13 +1254,15 @@ int main(void) {
 
                 *durationOfNextRecording = UINT32_MAX;
 
+                *timeOfNextGPSTimeSetting = UINT32_MAX;
+
             }
 
         }
 
     }
-
-    /* Flash warning if not ready to make recording */
+    
+    /* If not ready to make a recording then flash LED and power down */
 
     if (*readyToMakeRecordings == false) {
 
@@ -1074,13 +1272,67 @@ int main(void) {
 
     }
 
-    /* Make recording if appropriate */
+    /* Enable the magnetic switch */
+
+    bool magneticSwitchEnabled = configSettings->enableMagneticSwitch && switchPosition == AM_SWITCH_CUSTOM;
+
+    if (magneticSwitchEnabled) GPS_enableMagneticSwitch();
+
+    /* Reset flag */
+
+    bool shouldRecalculateWaitingTime = true;
+
+    bool shouldChangeMagnetWaitingState = false;
 
     bool enableLED = (switchPosition == AM_SWITCH_DEFAULT) || configSettings->enableLED;
 
+    /* If the GPS synchronisation window has passed then cancel it */
+
+    if (currentTime >= *timeOfNextGPSTimeSetting + GPS_MAX_TIME_SETTING_PERIOD) *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+    /* Calculate time until next activitiy */
+
     int64_t timeUntilPreparationStart = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)*recordingPreparationPeriod - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
 
-    if (timeUntilPreparationStart <= 0) {
+    int64_t timeUntilNextGPSTimeSetting = (int64_t)*timeOfNextGPSTimeSetting * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
+
+    /* Decide on the activity this wake up period */
+
+    if (*shouldSetTimeFromGPS && *waitingForMagneticSwitch == false) {
+
+        /* Set the time from the GPS */
+
+        if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem();
+            
+        GPS_fixResult_t fixResult = setTimeFromGPS(true, currentTime + GPS_MAX_TIME_SETTING_PERIOD);
+
+        AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+        /* Update the schedule if successful */
+
+        if (fixResult == GPS_SUCCESS) {
+
+            /* Reset the flag */
+
+            *shouldSetTimeFromGPS = false;
+
+            /* Schedule the next recording */
+
+            uint32_t scheduleTime = currentTime + ROUNDED_UP_DIV(currentMilliseconds + *recordingPreparationPeriod, MILLISECONDS_IN_SECOND);
+
+            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+
+        }
+        
+        /* If time setting was cancelled with the magnet switch then set the flag */
+
+        if (fixResult == GPS_CANCELLED_BY_MAGNETIC_SWITCH) {
+
+            shouldChangeMagnetWaitingState = true;
+
+        }
+
+    } else if (timeUntilPreparationStart <= 0) {
 
         /* Enable energy saver mode */
 
@@ -1182,6 +1434,14 @@ int main(void) {
 
         }
 
+        /* If recording was cancelled with the magnet switch then set the flag */
+
+        if (recordingState == MAGNETIC_SWITCH) {
+
+            shouldChangeMagnetWaitingState = true;
+
+        }
+
         /* Update the time and calculate earliest schedule start time */
 
         AudioMoth_getTime(&currentTime, &currentMilliseconds);
@@ -1200,7 +1460,7 @@ int main(void) {
 
             }
 
-            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording);
+            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
 
         }
 
@@ -1212,33 +1472,139 @@ int main(void) {
 
             *durationOfNextRecording = UINT32_MAX;
 
+            *timeOfNextGPSTimeSetting = UINT32_MAX;
+
         }
 
-        /* Calculate the time until recording preparation should start */
+    } else if (timeUntilNextGPSTimeSetting <= 0 && timeUntilPreparationStart > GPS_MIN_TIME_SETTING_PERIOD * MILLISECONDS_IN_SECOND) {
 
-        timeUntilPreparationStart = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)*recordingPreparationPeriod - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
+        /* Set the time from the GPS */
 
-    } else if (enableLED && switchPosition == AM_SWITCH_CUSTOM && timeUntilPreparationStart > MILLISECONDS_IN_SECOND) {
+        AudioMoth_enableFileSystem();
+
+        GPS_fixResult_t fixResult = setTimeFromGPS(enableLED, *timeOfNextRecording - ROUNDED_UP_DIV(*recordingPreparationPeriod, MILLISECONDS_IN_SECOND));
+
+        AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+        /* Update the next scheduled GPS fix time */
+
+        *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+        /* If time setting was cancelled with the magnet switch then set the flag */
+
+        if (fixResult == GPS_CANCELLED_BY_MAGNETIC_SWITCH) {
+
+            shouldChangeMagnetWaitingState = true;
+
+        }
+
+    } else if (magneticSwitch || (magneticSwitchEnabled && GPS_isMagneticSwitchClosed())) {
+    
+        shouldChangeMagnetWaitingState = true;
+    
+    } else if (enableLED && timeUntilPreparationStart > MILLISECONDS_IN_SECOND && timeUntilNextGPSTimeSetting > MILLISECONDS_IN_SECOND) {
+
+        /* Determine if LED should be shown on this cycle */
+
+        bool showFlash = *waitingForMagneticSwitch == false || (*waitingForMagneticSwitch && *magneticSwitchWaitingCounter % MAGNETIC_SWITCH_FLASH_MODULO == 0);
+
+        *magneticSwitchWaitingCounter = (*magneticSwitchWaitingCounter + 1) % MAGNETIC_SWITCH_FLASH_MODULO;
 
         /* Flash LED to indicate waiting */
 
-        if (*recordingErrorHasOccurred) {
+        if (showFlash) {
 
-            FLASH_LED(Both, WAITING_LED_FLASH_DURATION);
+            /* Choose which LED to show */
 
-        } else {
+            if (*recordingErrorHasOccurred) {
 
-            FLASH_LED(Green, WAITING_LED_FLASH_DURATION);
+                FLASH_LED(Both, WAITING_LED_FLASH_DURATION);
+
+            } else {
+
+                FLASH_LED(Green, WAITING_LED_FLASH_DURATION);
+
+            }
+
+            /* Update the time until recording preparation should start or next GPS time setting */
+
+            shouldRecalculateWaitingTime = false;
+
+            timeUntilPreparationStart -= WAITING_LED_FLASH_DURATION;
+
+            timeUntilNextGPSTimeSetting -= WAITING_LED_FLASH_DURATION;
 
         }
 
     }
 
+    /* Change the magnet waiting state */
+
+    if (shouldChangeMagnetWaitingState) {
+
+        for (uint32_t i = 0; i < MAGNETIC_SWITCH_CHANGE_FLASHES; i += 1) {
+
+            if (*waitingForMagneticSwitch) {
+
+                FLASH_LED(Green, SHORT_LED_FLASH_DURATION);
+
+            } else {
+
+                FLASH_LED(Red, SHORT_LED_FLASH_DURATION);
+
+            }
+
+            AudioMoth_delay(SHORT_LED_FLASH_DURATION);
+
+        }
+
+        /* Update the time */
+
+        AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+        /* Schedule recordings for the new state */
+
+        if (*waitingForMagneticSwitch) {
+
+            uint32_t scheduleTime = currentTime + ROUNDED_UP_DIV(currentMilliseconds + *recordingPreparationPeriod, MILLISECONDS_IN_SECOND);
+
+            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+
+            *waitingForMagneticSwitch = false;
+
+        } else {
+
+            *timeOfNextRecording = UINT32_MAX;
+
+            *durationOfNextRecording = UINT32_MAX;
+
+            *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+            *magneticSwitchWaitingCounter = 0;
+
+            *waitingForMagneticSwitch = true;
+
+        }
+
+    }
+
+    /* Calculate the time until recording preparation should start or next GPS time setting */
+
+    if (shouldRecalculateWaitingTime) {
+
+        timeUntilPreparationStart = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)*recordingPreparationPeriod - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
+
+        timeUntilNextGPSTimeSetting = (int64_t)*timeOfNextGPSTimeSetting * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
+
+    }
+
     /* Determine how long to power down */
 
-    uint32_t millisecondsToPowerDown = MAX(0, MIN(timeUntilPreparationStart - EM4_WAKEUP_PERIOD, WAITING_LED_FLASH_INTERVAL));
+    int64_t timeToEarliestEvent = MIN(timeUntilPreparationStart, timeUntilNextGPSTimeSetting) - EM4_WAKEUP_PERIOD;
 
-    SAVE_SWITCH_POSITION_AND_POWER_DOWN(millisecondsToPowerDown);
+    int64_t timeToWait = MAX(0, MIN(timeToEarliestEvent, WAITING_LED_FLASH_INTERVAL));
+
+    SAVE_SWITCH_POSITION_AND_POWER_DOWN(timeToWait);
 
 }
 
@@ -1252,8 +1618,149 @@ inline void AudioMoth_timezoneRequested(int8_t *timezoneHours, int8_t *timezoneM
 
 }
 
+/* GPS time handlers */
+
+void GPS_handleSetTime(uint32_t time, uint32_t milliseconds, int64_t timeDifference, uint32_t measuredClockFrequency) {
+
+    char setTimeBuffer[64];
+
+    /* Update the time if appropriate */
+
+    if (!AudioMoth_hasTimeBeenSet()) {
+
+        AudioMoth_setTime(time, milliseconds);
+
+        writeGPSLogMessage(time, milliseconds, "Time was set from GPS.");
+
+    } else {
+
+        if (timeDifference == 0) {
+
+            writeGPSLogMessage(time, milliseconds, "Time was not updated. The internal clock was correct.");
+
+        } else if (timeDifference < -GPS_MAXIMUM_MS_DIFFERENCE || timeDifference > GPS_MAXIMUM_MS_DIFFERENCE) {
+
+            writeGPSLogMessage(time, milliseconds, "Time was not updated. The discrepancy between the internal clock and the GPS was too large.");
+
+        } else {
+
+            AudioMoth_setTime(time, milliseconds);
+            
+            sprintf(setTimeBuffer, "Time was updated. The internal clock was %ldms %s.", timeDifference > 0 ? (int32_t)timeDifference : -(int32_t)timeDifference, timeDifference > 0 ? "fast" : "slow");
+
+            writeGPSLogMessage(time, milliseconds, setTimeBuffer);
+
+        }
+
+    }
+
+    /* Calculate the actual sampling rate */
+
+    uint32_t intendedClockFrequency = AudioMoth_getClockFrequency();
+
+    uint32_t intendedSamplingRate = configSettings->sampleRate / configSettings->sampleRateDivider;
+
+    uint32_t clockTicksPerSample = intendedClockFrequency / intendedSamplingRate;
+
+    uint64_t actualSamplingRate = ROUNDED_DIV(GPS_FREQUENCY_PRECISION * (uint64_t)measuredClockFrequency, (uint64_t)clockTicksPerSample);
+
+    uint32_t integerPart = actualSamplingRate / GPS_FREQUENCY_PRECISION;
+
+    uint32_t fractionalPart = actualSamplingRate % GPS_FREQUENCY_PRECISION;
+
+    sprintf(setTimeBuffer, "Actual sample rate will be %lu.%03lu Hz.", integerPart, fractionalPart);
+
+    writeGPSLogMessage(time, milliseconds, setTimeBuffer);
+
+}
+
+void GPS_handleGetTime(uint32_t *time, uint32_t *milliseconds) {
+
+    AudioMoth_getTime(time, milliseconds);
+
+}
+
+/* GPS interrupt handlers */
+
+void GPS_handleTickEvent() {
+
+    if (gpsTickEventCount == 0) {
+
+        gpsTickEventModulo = GPS_TICK_EVENTS_PER_SECOND;
+    
+        if (gpsPPSEvent || gpsFixEvent) {
+
+            gpsTickEventModulo /= 3;
+
+        } else if (gpsMessageEvent) {
+
+            gpsTickEventModulo /= 2;
+
+        }
+
+        gpsMessageEvent = false;
+
+        gpsFixEvent = false;
+
+        gpsPPSEvent = false;
+
+    }
+
+    if (gpsEnableLED) AudioMoth_setRedLED(gpsTickEventCount % gpsTickEventModulo == 0);
+
+    gpsTickEventCount = (gpsTickEventCount + 1) % GPS_TICK_EVENTS_PER_SECOND;
+
+}
+
+void GPS_handlePPSEvent(uint32_t time, uint32_t milliseconds) {
+
+    writeGPSLogMessage(time, milliseconds, "Received pulse per second signal.");
+
+    gpsPPSEvent = true;
+
+}
+
+void GPS_handleFixEvent(uint32_t time, uint32_t milliseconds, GPS_fixTime_t *fixTime, GPS_fixPosition_t *fixPosition, char *message) {
+
+    static char fixBuffer[128];
+
+    sprintf(fixBuffer, "Received GPS fix - %02d %02d.%04d %c %03d %02d.%04d %c at %02d/%02d/%04d %02d:%02d:%02d.%03d UTC.", fixPosition->latitudeDegrees, fixPosition->latitudeMinutes, fixPosition->latitudeTenThousandths, fixPosition->latitudeDirection, fixPosition->longitudeDegrees, fixPosition->longitudeMinutes, fixPosition->longitudeTenThousandths, fixPosition->longitudeDirection, fixTime->day, fixTime->month, fixTime->year, fixTime->hours, fixTime->minutes, fixTime->seconds, fixTime->milliseconds);
+
+    writeGPSLogMessage(time, milliseconds, fixBuffer);
+
+    gpsFixEvent = true;
+
+}
+
+void GPS_handleMessageEvent(uint32_t time, uint32_t milliseconds, char *message) {
+
+    if (!gpsFirstMessageReceived) {
+
+        writeGPSLogMessage(time, milliseconds, "Received first GPS message.");
+
+        gpsFirstMessageReceived = true;
+
+    }
+
+    gpsMessageEvent = true;
+
+}
+
+inline void GPS_handleMagneticSwitchInterrupt() {
+
+    magneticSwitch = true;
+
+    GPS_cancelTimeSetting(GPS_CANCEL_BY_MAGNETIC_SWITCH);
+
+}
 
 /* AudioMoth interrupt handlers */
+
+inline void AudioMoth_handleMicrophoneChangeInterrupt() {
+
+    microphoneChanged = true;
+
+}
 
 inline void AudioMoth_handleSwitchInterrupt() {
 
@@ -1261,11 +1768,7 @@ inline void AudioMoth_handleSwitchInterrupt() {
 
     AudioConfig_cancelAudioConfiguration();
 
-}
-
-inline void AudioMoth_handleMicrophoneChangeInterrupt() {
-
-    microphoneChanged = true;
+    GPS_cancelTimeSetting(GPS_CANCEL_BY_SWITCH);
 
 }
 
@@ -1275,15 +1778,19 @@ inline void AudioMoth_handleDirectMemoryAccessInterrupt(bool isPrimaryBuffer, in
 
     if (isPrimaryBuffer) source = primaryBuffer;
 
-    /* Update the current buffer index and write buffer */
+    /* Apply filter to samples */
 
-    bool thresholdExceeded = DigitalFilter_filter(source, buffers[writeBuffer] + writeBufferIndex, configSettings->sampleRateDivider, numberOfSamplesInDMATransfer, configSettings->amplitudeThreshold);
+    bool thresholdExceeded = DigitalFilter_filter(source, buffers[writeBuffer] + writeBufferIndex, configSettings->sampleRateDivider, numberOfRawSamplesInDMATransfer, configSettings->amplitudeThreshold);
 
-    if (shouldProcessTransfers) {
+    numberOfDMATransfers += 1;
+
+    /* Update the current buffer index and write buffer if wait period is over */
+
+    if (numberOfDMATransfers > numberOfDMATransfersToWait) {
 
         writeIndicator[writeBuffer] |= thresholdExceeded;
 
-        writeBufferIndex += numberOfSamplesInDMATransfer / configSettings->sampleRateDivider;
+        writeBufferIndex += numberOfRawSamplesInDMATransfer / configSettings->sampleRateDivider;
 
         if (writeBufferIndex == NUMBER_OF_SAMPLES_IN_BUFFER) {
 
@@ -1589,19 +2096,21 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     float sampleMultiplier = 16.0f / (float)(configSettings->oversampleRate * configSettings->sampleRateDivider);
 
+    if (AudioMoth_hasInvertedOutput()) sampleMultiplier = -sampleMultiplier;
+
     DigitalFilter_applyAdditionalGain(sampleMultiplier);
 
     /* Calculate the number of samples in each DMA transfer (while ensuring that number of samples written to the SRAM buffer on each DMA transfer is a power of two so each SRAM buffer is filled after an integer number of DMA transfers) */
 
-    numberOfSamplesInDMATransfer = MAXIMUM_SAMPLES_IN_DMA_TRANSFER / configSettings->sampleRateDivider;
+    numberOfRawSamplesInDMATransfer = MAXIMUM_SAMPLES_IN_DMA_TRANSFER / configSettings->sampleRateDivider;
 
-    while (numberOfSamplesInDMATransfer & (numberOfSamplesInDMATransfer - 1)) {
+    while (numberOfRawSamplesInDMATransfer & (numberOfRawSamplesInDMATransfer - 1)) {
 
-        numberOfSamplesInDMATransfer = numberOfSamplesInDMATransfer & (numberOfSamplesInDMATransfer - 1);
+        numberOfRawSamplesInDMATransfer = numberOfRawSamplesInDMATransfer & (numberOfRawSamplesInDMATransfer - 1);
 
     }
 
-    numberOfSamplesInDMATransfer *= configSettings->sampleRateDivider;
+    numberOfRawSamplesInDMATransfer *= configSettings->sampleRateDivider;
 
     /* Calculate the minimum amplitude threshold duration */
 
@@ -1609,19 +2118,19 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     /* Initialise termination conditions */
 
-    bool supplyVoltageLow = false;
-
     microphoneChanged = false;
+
+    bool supplyVoltageLow = false;
 
     /* Initialise microphone for recording */
 
     AudioMoth_enableExternalSRAM();
 
-    bool externalMicrophone = AudioMoth_enableMicrophone(configSettings->gain, configSettings->clockDivider, configSettings->acquisitionCycles, configSettings->oversampleRate);
+    AM_gainRange_t gainRange = configSettings->enableLowGainRange ? AM_LOW_GAIN_RANGE : AM_NORMAL_GAIN_RANGE;
 
-    AudioMoth_initialiseDirectMemoryAccess(primaryBuffer, secondaryBuffer, numberOfSamplesInDMATransfer);
+    bool externalMicrophone = AudioMoth_enableMicrophone(gainRange, configSettings->gain, configSettings->clockDivider, configSettings->acquisitionCycles, configSettings->oversampleRate);
 
-    AudioMoth_startMicrophoneSamples(configSettings->sampleRate);
+    AudioMoth_initialiseDirectMemoryAccess(primaryBuffer, secondaryBuffer, numberOfRawSamplesInDMATransfer);
 
     /* Show LED for SD card activity */
 
@@ -1645,11 +2154,11 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     AudioMoth_getTime(fileOpenTime, fileOpenMilliseconds);
 
-    /* Calculate time correction for sample rate */
+    /* Calculate time correction for sample rate due to file header */
 
     uint32_t numberOfSamplesInHeader = sizeof(wavHeader) / NUMBER_OF_BYTES_IN_SAMPLE;
 
-    uint32_t sampleRateTimeOffset = ROUNDED_DIV(numberOfSamplesInHeader * MILLISECONDS_IN_SECOND, effectiveSampleRate);
+    int32_t sampleRateTimeOffset = ROUNDED_DIV(numberOfSamplesInHeader * MILLISECONDS_IN_SECOND, effectiveSampleRate);
 
     /* Calculate time until the recording should start */
 
@@ -1661,23 +2170,21 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     recordDuration = timeOffset >= recordDuration ? 0 : recordDuration - timeOffset;
 
-    /* Wait until the recording start time */
+    millisecondsUntilRecordingShouldStart += timeOffset * MILLISECONDS_IN_SECOND;
 
-    uint32_t time;
+    /* Calculate the period to wait before starting the DMA transfers */
 
-    uint32_t milliseconds;
+    uint32_t numberOfRawSamplesPerMillisecond = configSettings->sampleRate / MILLISECONDS_IN_SECOND;
 
-    while (millisecondsUntilRecordingShouldStart > 0 && !microphoneChanged && !switchPositionChanged) {
+    uint32_t numberOfRawSamplesToWait = millisecondsUntilRecordingShouldStart * numberOfRawSamplesPerMillisecond;
 
-        AudioMoth_delay(1);
+    numberOfDMATransfersToWait = numberOfRawSamplesToWait / numberOfRawSamplesInDMATransfer;
 
-        AudioMoth_getTime(&time, &milliseconds);
+    uint32_t remainingNumberOfRawSamples = numberOfRawSamplesToWait % numberOfRawSamplesInDMATransfer;
 
-        millisecondsUntilRecordingShouldStart = (int64_t)timeOfNextRecording * MILLISECONDS_IN_SECOND + (int64_t)timeOffset * MILLISECONDS_IN_SECOND - (int64_t)time * MILLISECONDS_IN_SECOND - (int64_t)milliseconds - (int64_t)sampleRateTimeOffset;
+    uint32_t remainingMillisecondsToWait = ROUNDED_DIV(remainingNumberOfRawSamples, numberOfRawSamplesPerMillisecond);
 
-    }
-
-    /* Calculate recording parameters */
+    /* Calculate updated recording parameters */
 
     uint32_t maximumNumberOfSeconds = (MAXIMUM_WAV_FILE_SIZE - sizeof(wavHeader)) / NUMBER_OF_BYTES_IN_SAMPLE / effectiveSampleRate;
 
@@ -1703,13 +2210,17 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     /* Start processing DMA transfers */
 
-    shouldProcessTransfers = true;
+    numberOfDMATransfers = 0;
+
+    AudioMoth_delay(remainingMillisecondsToWait);
+
+    AudioMoth_startMicrophoneSamples(configSettings->sampleRate);
 
     /* Main recording loop */
 
-    while (samplesWritten < numberOfSamples + numberOfSamplesInHeader && !microphoneChanged && !switchPositionChanged && !supplyVoltageLow) {
+    while (samplesWritten < numberOfSamples + numberOfSamplesInHeader && !microphoneChanged && !switchPositionChanged && !magneticSwitch && !supplyVoltageLow) {
 
-        while (readBuffer != writeBuffer && samplesWritten < numberOfSamples + numberOfSamplesInHeader && !microphoneChanged && !switchPositionChanged && !supplyVoltageLow) {
+        while (readBuffer != writeBuffer && samplesWritten < numberOfSamples + numberOfSamplesInHeader && !microphoneChanged && !switchPositionChanged && !magneticSwitch && !supplyVoltageLow) {
 
             /* Determine the appropriate number of bytes to the SD card */
 
@@ -1831,6 +2342,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     AM_recordingState_t recordingState = microphoneChanged ? MICROPHONE_CHANGED :
                                          switchPositionChanged ? SWITCH_CHANGED :
+                                         magneticSwitch ? MAGNETIC_SWITCH :
                                          supplyVoltageLow ? SUPPLY_VOLTAGE_LOW :
                                          fileSizeLimited ? FILE_SIZE_LIMITED :
                                          RECORDING_OKAY;
@@ -1881,7 +2393,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
 /* Schedule recordings */
 
-static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording) {
+static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *timeOfNextGPSTimeSetting) {
 
     /* Check number of active state stop periods */
 
@@ -1894,6 +2406,8 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
         *timeOfNextRecording = UINT32_MAX;
 
         *durationOfNextRecording = 0;
+
+        *timeOfNextGPSTimeSetting = UINT32_MAX;
 
         goto done;
 
@@ -1928,6 +2442,10 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
         uint32_t stopSeconds = SECONDS_IN_MINUTE * period->stopMinutes;
 
         uint32_t durationOfStartStopPeriod = stopSeconds - startSeconds;
+
+        /* Calculate the start time of this start stop period */
+
+        *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? currentTime + startSeconds - currentSeconds - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
 
         /* Check if the start stop period has not yet started */
 
@@ -2023,6 +2541,8 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     }
 
+    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextRecording - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+
 done:
 
     /* Check if recording should be limited by last recording time */
@@ -2034,6 +2554,8 @@ done:
             *timeOfNextRecording = UINT32_MAX;
 
             *durationOfNextRecording = 0;
+
+            *timeOfNextGPSTimeSetting = UINT32_MAX;
 
         } else {
 
