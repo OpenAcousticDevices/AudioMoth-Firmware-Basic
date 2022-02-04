@@ -109,7 +109,8 @@
 
 /* Magnetic switch constants */
 
-#define MAGNETIC_SWITCH_FLASH_MODULO            2
+#define MAGNETIC_SWITCH_WAIT_INTERVAL           500
+#define MAGNETIC_SWITCH_WAIT_MULTIPLIER         2
 
 #define MAGNETIC_SWITCH_CHANGE_FLASHES          10
 
@@ -766,7 +767,7 @@ static uint32_t *recordingErrorHasOccurred = (uint32_t*)(AM_BACKUP_DOMAIN_START_
 
 static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
 
-static uint32_t *magneticSwitchWaitingCounter = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
+static uint32_t *magneticSwitchWaitCounter = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
 
 static uint32_t *waitingForMagneticSwitch = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
 
@@ -850,7 +851,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 7, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 7, 1};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -884,7 +885,7 @@ static void copyToBackupDomain(uint32_t *dst, uint8_t *src, uint32_t length) {
         value = (value << BITS_PER_BYTE) + *(src + length - 1 - i);
     }
 
-    *(dst + length / UINT32_SIZE_IN_BYTES) = value;
+    if (length % UINT32_SIZE_IN_BYTES) *(dst + length / UINT32_SIZE_IN_BYTES) = value;
 
 }
 
@@ -1004,9 +1005,9 @@ int main(void) {
 
         *recordingPreparationPeriod = INITIAL_PREPARATION_PERIOD;
 
-        /* Initialise magentic switch state variables */
+        /* Initialise magnetic switch state variables */
 
-        *magneticSwitchWaitingCounter = 0;
+        *magneticSwitchWaitCounter = 0;
 
         *waitingForMagneticSwitch = false;
 
@@ -1224,7 +1225,11 @@ int main(void) {
 
             if (switchPosition == AM_SWITCH_CUSTOM) {
 
-                if (configSettings->enableMagneticSwitch) {
+                *magneticSwitchWaitCounter = 0;
+
+                *waitingForMagneticSwitch = configSettings->enableMagneticSwitch;
+
+                if (configSettings->enableMagneticSwitch || *shouldSetTimeFromGPS) {
 
                     *timeOfNextRecording = UINT32_MAX;
 
@@ -1232,15 +1237,9 @@ int main(void) {
 
                     *timeOfNextGPSTimeSetting = UINT32_MAX;
 
-                    *magneticSwitchWaitingCounter = 0;
-
-                    *waitingForMagneticSwitch = true;
-
                 } else {
 
                     scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
-
-                    *waitingForMagneticSwitch = false;
 
                 }
 
@@ -1286,15 +1285,23 @@ int main(void) {
 
     bool enableLED = (switchPosition == AM_SWITCH_DEFAULT) || configSettings->enableLED;
 
-    /* If the GPS synchronisation window has passed then cancel it */
-
-    if (currentTime >= *timeOfNextGPSTimeSetting + GPS_MAX_TIME_SETTING_PERIOD) *timeOfNextGPSTimeSetting = UINT32_MAX;
-
-    /* Calculate time until next activitiy */
+    /* Calculate time until next activity */
 
     int64_t timeUntilPreparationStart = (int64_t)*timeOfNextRecording * MILLISECONDS_IN_SECOND - (int64_t)*recordingPreparationPeriod - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
 
     int64_t timeUntilNextGPSTimeSetting = (int64_t)*timeOfNextGPSTimeSetting * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
+
+    /* If the GPS synchronisation window has passed then cancel it */
+
+    int64_t timeSinceScheduledGPSTimeSetting = -timeUntilNextGPSTimeSetting;
+
+    if (timeSinceScheduledGPSTimeSetting > GPS_MAX_TIME_SETTING_PERIOD * MILLISECONDS_IN_SECOND) {
+
+        *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+        timeUntilNextGPSTimeSetting = (int64_t)*timeOfNextGPSTimeSetting * MILLISECONDS_IN_SECOND - (int64_t)currentTime * MILLISECONDS_IN_SECOND - (int64_t)currentMilliseconds;
+
+    }
 
     /* Decide on the activity this wake up period */
 
@@ -1506,9 +1513,19 @@ int main(void) {
 
         /* Determine if LED should be shown on this cycle */
 
-        bool showFlash = *waitingForMagneticSwitch == false || (*waitingForMagneticSwitch && *magneticSwitchWaitingCounter % MAGNETIC_SWITCH_FLASH_MODULO == 0);
+        bool showFlash = true;
 
-        *magneticSwitchWaitingCounter = (*magneticSwitchWaitingCounter + 1) % MAGNETIC_SWITCH_FLASH_MODULO;
+        if (magneticSwitchEnabled) {
+
+            uint32_t flashModulo = WAITING_LED_FLASH_INTERVAL / MAGNETIC_SWITCH_WAIT_INTERVAL;
+
+            if (*waitingForMagneticSwitch) flashModulo *= MAGNETIC_SWITCH_WAIT_MULTIPLIER;
+
+            showFlash = *magneticSwitchWaitCounter % flashModulo == 0;
+
+            *magneticSwitchWaitCounter = (*magneticSwitchWaitCounter + 1) % flashModulo;
+
+        }
 
         /* Flash LED to indicate waiting */
 
@@ -1580,7 +1597,7 @@ int main(void) {
 
             *timeOfNextGPSTimeSetting = UINT32_MAX;
 
-            *magneticSwitchWaitingCounter = 0;
+            *magneticSwitchWaitCounter = 0;
 
             *waitingForMagneticSwitch = true;
 
@@ -1602,7 +1619,9 @@ int main(void) {
 
     int64_t timeToEarliestEvent = MIN(timeUntilPreparationStart, timeUntilNextGPSTimeSetting) - EM4_WAKEUP_PERIOD;
 
-    int64_t timeToWait = MAX(0, MIN(timeToEarliestEvent, WAITING_LED_FLASH_INTERVAL));
+    uint32_t interval = magneticSwitchEnabled ? MAGNETIC_SWITCH_WAIT_INTERVAL : WAITING_LED_FLASH_INTERVAL;
+
+    int64_t timeToWait = MAX(0, MIN(timeToEarliestEvent, interval));
 
     SAVE_SWITCH_POSITION_AND_POWER_DOWN(timeToWait);
 
@@ -1950,7 +1969,7 @@ void AudioConfig_handleAudioConfigurationPacket(uint8_t *receiveBuffer, uint32_t
 
     bool isTimePacket = size == (UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES);
 
-    bool isDeploymentPacket = size  == (UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES + DEPLOYMENT_ID_LENGTH);
+    bool isDeploymentPacket = size == (UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES + DEPLOYMENT_ID_LENGTH);
 
     if (isTimePacket || isDeploymentPacket) {
 
