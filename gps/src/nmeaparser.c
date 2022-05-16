@@ -169,7 +169,7 @@ DEFINE_FUNCTION_ELSE(GGA, 54, ISVALID, XOR_CALCULATED_CHECKSUM, IS('*'), INC_STA
 DEFINE_FUNCTION_STEP(GGA, 55, ISHEXDIGIT, INC_STATE; SET_RECEIVED_CHECKSUM(16 * HEXVALUE))
 DEFINE_FUNCTION_STEP(GGA, 56, ISHEXDIGIT, ZERO_STATE; XOR_RECEIVED_CHECKSUM(HEXVALUE); TEST_CHECKSUM_AND_SET_STATUS)
 
-void (*GGAfunctions[])(char, NMEA_parserState_t*, NMEA_parserResultGGA_t*) = {GGA00, GGA01, GGA02, GGA03, GGA04, GGA05, GGA06, GGA07,  \
+void (*const GGAfunctions[])(char, NMEA_parserState_t*, NMEA_parserResultGGA_t*) = {GGA00, GGA01, GGA02, GGA03, GGA04, GGA05, GGA06, GGA07,  \
                                                                               GGA08, GGA09, GGA10, GGA11, GGA12, GGA13, GGA14, GGA15,  \
                                                                               GGA16, GGA17, GGA18, GGA19, GGA20, GGA21, GGA22, GGA23,  \
                                                                               GGA24, GGA25, GGA26, GGA27, GGA28, GGA29, GGA30, GGA31,  \
@@ -237,7 +237,7 @@ DEFINE_FUNCTION_ELSE(RMC, 53, ISVALID, XOR_CALCULATED_CHECKSUM, IS('*'), INC_STA
 DEFINE_FUNCTION_STEP(RMC, 54, ISHEXDIGIT, INC_STATE; SET_RECEIVED_CHECKSUM(16 * HEXVALUE))
 DEFINE_FUNCTION_STEP(RMC, 55, ISHEXDIGIT, ZERO_STATE; XOR_RECEIVED_CHECKSUM(HEXVALUE); TEST_CHECKSUM_AND_SET_STATUS)
 
-void (*RMCfunctions[])(char, NMEA_parserState_t*, NMEA_parserResultRMC_t*) = {RMC00, RMC01, RMC02, RMC03, RMC04, RMC05, RMC06, RMC07,  \
+void (*const RMCfunctions[])(char, NMEA_parserState_t*, NMEA_parserResultRMC_t*) = {RMC00, RMC01, RMC02, RMC03, RMC04, RMC05, RMC06, RMC07,  \
                                                                               RMC08, RMC09, RMC10, RMC11, RMC12, RMC13, RMC14, RMC15,  \
                                                                               RMC16, RMC17, RMC18, RMC19, RMC20, RMC21, RMC22, RMC23,  \
                                                                               RMC24, RMC25, RMC26, RMC27, RMC28, RMC29, RMC30, RMC31,  \
@@ -252,7 +252,7 @@ DEFINE_FUNCTION_ELSE(DEFAULT, 01, ISVALID, XOR_CALCULATED_CHECKSUM; ADD_TO_BUFFE
 DEFINE_FUNCTION_STEP(DEFAULT, 02, ISHEXDIGIT, INC_STATE; SET_RECEIVED_CHECKSUM(16 * HEXVALUE))
 DEFINE_FUNCTION_STEP(DEFAULT, 03, ISHEXDIGIT, ZERO_STATE; XOR_RECEIVED_CHECKSUM(HEXVALUE); TEST_CHECKSUM_AND_SET_STATUS)
 
-void (*DEFAULTfunctions[])(char, NMEA_parserState_t*, NMEA_parserResultDEFAULT_t*) = {DEFAULT00, DEFAULT01, DEFAULT02, DEFAULT03};
+void (*const DEFAULTfunctions[])(char, NMEA_parserState_t*, NMEA_parserResultDEFAULT_t*) = {DEFAULT00, DEFAULT01, DEFAULT02, DEFAULT03};
 
 /* Define parsers */
 

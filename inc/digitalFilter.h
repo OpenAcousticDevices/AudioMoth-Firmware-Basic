@@ -18,15 +18,23 @@ typedef enum {DF_BAND_PASS_FILTER, DF_HIGH_PASS_FILTER} DF_filterType_t;
 
 void DigitalFilter_reset();
 
-void DigitalFilter_applyAdditionalGain(float gain);
+bool DigitalFilter_applyFilter(int16_t *source, int16_t *dest, uint32_t sampleRateDivider, uint32_t size);
 
-bool DigitalFilter_filter(int16_t *source, int16_t *dest, uint32_t sampleRateDivider, uint32_t size, uint16_t amplitudeThreshold);
+bool DigitalFilter_applyFrequencyTrigger(int16_t *source, uint32_t size);
 
 /* Design filters */
 
 void DigitalFilter_designHighPassFilter(uint32_t sampleRate, uint32_t freq);
 
 void DigitalFilter_designBandPassFilter(uint32_t sampleRate, uint32_t freq1, uint32_t freq2);
+
+/* Set filter options */
+
+void DigitalFilter_setAdditionalGain(float gain);
+
+void DigitalFilter_setAmplitudeThreshold(uint16_t amplitudeThreshold);
+
+void DigitalFilter_setFrequencyTrigger(uint32_t windowLength, uint32_t sampleRate, uint32_t frequency, float percentageThreshold);
 
 /* Read back filter setting */
 
