@@ -54,7 +54,11 @@
 
 #define VCO_GAIN                            0.5f
 
-#define AGC_FILTER_CUTOFF_FREQUENCY         20
+#define USE_AGC                             true
+#define MANUAL_GAIN_DIVISOR                 5000.0f
+#define AGC_MINIMUM_AMPLITUDE               100.0f
+#define AGC_FILTER_CUTOFF_FREQUENCY         1000
+
 #define CHANNEL_FILTER_CUTOFF_FREQUENCY     100
 #define CHANNEL_FILTER_BANDWIDTH            2.0f
 #define CARRIER_FILTER_CUTOFF_FREQUENCY     1000
@@ -74,6 +78,8 @@
 #define STATIC_UBUF(x, y)                   static uint8_t x[((y) + 3) & ~3] __attribute__ ((aligned(4)))
 
 #define MIN(a, b)                           ((a) < (b) ? (a) : (b))
+
+#define MAX(a, b)                           ((a) > (b) ? (a) : (b))
 
 /* Sine table */
 
@@ -150,7 +156,7 @@ static BQ_filterCoefficients_t channelFilterCoefficients;
 
 /* Carrier generation variable */
 
-float omegaT = 0.0f;
+static float omegaT = 0.0f;
 
 /* Configuration variables */
 
@@ -170,7 +176,7 @@ typedef enum {NONE, HIGH_BIT, LOW_BIT} receivedBit_t;
 
 /* CRC functions */
 
-static uint16_t updateCRC(uint16_t crc_in, int incr) {
+static inline uint16_t updateCRC(uint16_t crc_in, int incr) {
 
     uint16_t xor = crc_in >> 15;
     uint16_t out = crc_in << 1;
@@ -187,7 +193,7 @@ static uint16_t updateCRC(uint16_t crc_in, int incr) {
 
 }
 
-static uint16_t calculateCRC(const uint8_t *data, uint32_t size) {
+static inline uint16_t calculateCRC(const uint8_t *data, uint32_t size) {
 
     uint16_t crc, i;
 
@@ -205,7 +211,7 @@ static uint16_t calculateCRC(const uint8_t *data, uint32_t size) {
 
 }
 
-static bool checkCRC(const uint8_t *data, uint32_t size) {
+static inline bool checkCRC(const uint8_t *data, uint32_t size) {
 
     uint16_t crc = calculateCRC(data, size - CRC_SIZE_IN_BYTES);
 
@@ -218,15 +224,25 @@ static bool checkCRC(const uint8_t *data, uint32_t size) {
 
 /* Function to perform Costas loop */
 
-float updateCostasLoop(float sample) {
+static inline float updateCostasLoop(float sample) {
 
     /* Apply gain control */
 
     float filteredSample = Butterworth_applyBandPassFilter(sample, &carrierFilter, &carrierFilterCoefficients);
 
-    float agcOutput = Butterworth_applyLowPassFilter(filteredSample > 0 ? filteredSample : -filteredSample, &agcFilter, &agcFilterCoefficients);
+    if (USE_AGC) {
 
-    if (agcOutput != 0) filteredSample /= agcOutput;
+        float regulatedFilteredSample = filteredSample > 0.0f ? filteredSample : -filteredSample;
+
+        float agcOutput = Butterworth_applyLowPassFilter(regulatedFilteredSample, &agcFilter, &agcFilterCoefficients);
+
+        filteredSample /= MAX(agcOutput, AGC_MINIMUM_AMPLITUDE);
+
+    } else {
+
+        filteredSample /= MANUAL_GAIN_DIVISOR;
+
+    }
 
     /* Demodulate input sound */
 
@@ -258,9 +274,9 @@ float updateCostasLoop(float sample) {
 
 inline void AudioMoth_handleMicrophoneInterrupt(int16_t sample) {
 
-    configSample = sample;
-
     configSampleReady = true;
+
+    configSample = sample;
 
 }
 
@@ -272,27 +288,29 @@ void AudioConfig_enableAudioConfiguration() {
 
     AudioMoth_enableMicrophone(CONFIG_GAIN_RANGE, CONFIG_GAIN, CONFIG_CLOCK_DIVIDER, CONFIG_ACQUISITION_CYCLES, CONFIG_OVERSAMPLE_RATE);
 
-    AudioMoth_startMicrophoneSamples(CONFIG_SAMPLE_RATE);
-
-    AudioMoth_initialiseMicrophoneInterupts();
+    AudioMoth_initialiseMicrophoneInterrupts();
 
     /* Design filters */
 
-    Butterworth_designLowPassFilter(&agcFilterCoefficients, CONFIG_SAMPLE_RATE, SPEED_FACTOR * AGC_FILTER_CUTOFF_FREQUENCY);
-
     Butterworth_designBandPassFilter(&carrierFilterCoefficients, CONFIG_SAMPLE_RATE, CONFIG_CARRIER_FREQUENCY - CARRIER_FILTER_CUTOFF_FREQUENCY, CONFIG_CARRIER_FREQUENCY + CARRIER_FILTER_CUTOFF_FREQUENCY);
+
+    if (USE_AGC) Butterworth_designLowPassFilter(&agcFilterCoefficients, CONFIG_SAMPLE_RATE, SPEED_FACTOR * AGC_FILTER_CUTOFF_FREQUENCY);
 
     Biquad_designLowPassFilter(&channelFilterCoefficients, CONFIG_SAMPLE_RATE, SPEED_FACTOR * CHANNEL_FILTER_CUTOFF_FREQUENCY, CHANNEL_FILTER_BANDWIDTH);
 
     /* Initialise filters */
 
-    Butterworth_initialise(&agcFilter);
-
     Butterworth_initialise(&carrierFilter);
+
+    if (USE_AGC) Butterworth_initialise(&agcFilter);
 
     Biquad_initialise(&channel1Filter);
 
     Biquad_initialise(&channel2Filter);
+
+    /* Start the microphone samples */
+
+    AudioMoth_startMicrophoneSamples(CONFIG_SAMPLE_RATE);
 
 }
 
@@ -344,7 +362,7 @@ bool AudioConfig_listenForAudioConfigurationTone(uint32_t milliseconds) {
 
             /* Check thresholds */
 
-            if ((lastValue > 0 && costasLoopOutput < 0) || (lastValue < 0 && costasLoopOutput > 0)) {
+            if ((lastValue >= 0 && costasLoopOutput < 0) || (lastValue < 0 && costasLoopOutput >= 0)) {
 
                 uint32_t period = counter - lastCrossing;
 
@@ -368,19 +386,15 @@ bool AudioConfig_listenForAudioConfigurationTone(uint32_t milliseconds) {
 
             }
 
+            /* Update counters and status */
+
             lastValue = costasLoopOutput;
+
+            configSampleReady = false;
 
             counter += 1;
 
         }
-
-        /* Wait for next sample */
-
-        configSampleReady = false;
-
-        /* Sleep until next interrupt occurs */
-
-        AudioMoth_sleep();
 
     }
 
@@ -434,7 +448,7 @@ bool AudioConfig_listenForAudioConfigurationPackets(bool timeout, uint32_t milli
 
             /* Check thresholds */
 
-            if ((lastValue > 0 && costasLoopOutput < 0) || (lastValue < 0 && costasLoopOutput > 0)) {
+            if ((lastValue >= 0 && costasLoopOutput < 0) || (lastValue < 0 && costasLoopOutput >= 0)) {
 
                 uint32_t period = counter - lastCrossing;
 
@@ -606,19 +620,15 @@ bool AudioConfig_listenForAudioConfigurationPackets(bool timeout, uint32_t milli
 
             }
 
+            /* Update counters and status */
+
             lastValue = costasLoopOutput;
+
+            configSampleReady = false;
 
             counter += 1;
 
         }
-
-        /* Wait for next sample */
-
-        configSampleReady = false;
-
-        /* Sleep until next interrupt occurs */
-
-        AudioMoth_sleep();
 
     }
 

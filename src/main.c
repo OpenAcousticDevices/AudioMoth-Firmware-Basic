@@ -911,7 +911,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 8, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 8, 1};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -1031,7 +1031,7 @@ static GPS_fixResult_t setTimeFromGPS(bool enableLED, uint32_t timeout) {
 
 }
 
-/* Magenetic switch wait functions */
+/* Magnetic switch wait functions */
 
 static void startWaitingForMagneticSwith() {
 
@@ -2345,7 +2345,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     /* Calculate time correction for sample rate due to file header */
 
-    uint32_t numberOfSamplesInHeader = sizeof(wavHeader) / NUMBER_OF_BYTES_IN_SAMPLE;
+    uint32_t numberOfSamplesInHeader = sizeof(wavHeader_t) / NUMBER_OF_BYTES_IN_SAMPLE;
 
     int32_t sampleRateTimeOffset = ROUNDED_DIV(numberOfSamplesInHeader * MILLISECONDS_IN_SECOND, effectiveSampleRate);
 
@@ -2375,7 +2375,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     /* Calculate updated recording parameters */
 
-    uint32_t maximumNumberOfSeconds = (MAXIMUM_WAV_FILE_SIZE - sizeof(wavHeader)) / NUMBER_OF_BYTES_IN_SAMPLE / effectiveSampleRate;
+    uint32_t maximumNumberOfSeconds = (MAXIMUM_WAV_FILE_SIZE - sizeof(wavHeader_t)) / NUMBER_OF_BYTES_IN_SAMPLE / effectiveSampleRate;
 
     bool fileSizeLimited = (recordDuration > maximumNumberOfSeconds);
 
@@ -2469,11 +2469,11 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
                     while (numberOfBlankSamplesToWrite > 0) {
 
-                        uint32_t numberOfSmples = MIN(numberOfBlankSamplesToWrite, COMPRESSION_BUFFER_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE);
+                        uint32_t numberOfSamples = MIN(numberOfBlankSamplesToWrite, COMPRESSION_BUFFER_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE);
 
-                        FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(compressionBuffer, NUMBER_OF_BYTES_IN_SAMPLE * numberOfSmples));
+                        FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(compressionBuffer, NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples));
 
-                        numberOfBlankSamplesToWrite -= numberOfSmples;
+                        numberOfBlankSamplesToWrite -= numberOfSamples;
 
                     }
 
@@ -2554,7 +2554,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_seekInFile(0));
 
-    FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader)));
+    FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader_t)));
 
     /* Close the file */
 
