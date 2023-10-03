@@ -1735,7 +1735,7 @@ int main(void) {
 
         if (shouldFlashLED) {
 
-            if (*numberOfRecordingErrors >= MAXIMUM_NUMBER_OF_RECORDING_ERRORS) {
+            if (*numberOfRecordingErrors > 0) {
 
                 FLASH_LED(Both, WAITING_LED_FLASH_DURATION);
 
