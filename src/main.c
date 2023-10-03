@@ -12,9 +12,9 @@
 #include <stdbool.h>
 
 #include "gps.h"
-#include "audioMoth.h"
-#include "audioConfig.h"
-#include "digitalFilter.h"
+#include "audiomoth.h"
+#include "audioconfig.h"
+#include "digitalfilter.h"
 
 /* Useful time constants */
 
@@ -90,9 +90,13 @@
 #define LOW_DC_BLOCKING_FREQ                    8
 #define DEFAULT_DC_BLOCKING_FREQ                48
 
-/* Supply monitor constant */
+/* Supply voltage constant */
 
 #define MINIMUM_SUPPLY_VOLTAGE                  2800
+
+/* Recording error constant */
+
+#define MAXIMUM_NUMBER_OF_RECORDING_ERRORS      5
 
 /* Deployment ID constant */
 
@@ -158,6 +162,8 @@
 #define FLASH_LED_AND_RETURN_ON_ERROR(fn) { \
     bool success = (fn); \
     if (success != true) { \
+        AudioMoth_setBothLED(false); \
+        AudioMoth_delay(LONG_LED_FLASH_DURATION); \
         FLASH_LED(Both, LONG_LED_FLASH_DURATION) \
         return SDCARD_WRITE_ERROR; \
     } \
@@ -835,7 +841,7 @@ static uint32_t *readyToMakeRecordings = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDR
 
 static uint32_t *shouldSetTimeFromGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
 
-static uint32_t *recordingErrorHasOccurred = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
 
 static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
 
@@ -923,7 +929,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 8, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 8, 2};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -1123,7 +1129,7 @@ int main(void) {
 
         *readyToMakeRecordings = false;
 
-        *recordingErrorHasOccurred = false;
+        *numberOfRecordingErrors = 0;
 
         *recordingPreparationPeriod = INITIAL_PREPARATION_PERIOD;
 
@@ -1311,9 +1317,9 @@ int main(void) {
 
             if (isEnergySaverMode(configSettings)) AudioMoth_setClockDivider(AM_HF_CLK_DIV2);
 
-            /* Reset the error flag */
+            /* Reset the recording error counter */
 
-            *recordingErrorHasOccurred = false;
+            *numberOfRecordingErrors = 0;
 
             /* Reset the recording preparation period to default */
 
@@ -1527,8 +1533,6 @@ int main(void) {
 
         } else {
 
-            if (enableLED) FLASH_LED(Both, LONG_LED_FLASH_DURATION);
-
             recordingState = SUPPLY_VOLTAGE_LOW;
 
         }
@@ -1539,9 +1543,19 @@ int main(void) {
 
         /* Enable the error warning flashes */
 
-        if (switchPosition == AM_SWITCH_CUSTOM && (recordingState == SDCARD_WRITE_ERROR || recordingState == SUPPLY_VOLTAGE_LOW)) {
+        if (recordingState == SUPPLY_VOLTAGE_LOW) {
 
-            *recordingErrorHasOccurred = true;
+            AudioMoth_delay(LONG_LED_FLASH_DURATION);
+
+            FLASH_LED(Both, LONG_LED_FLASH_DURATION);
+
+            *numberOfRecordingErrors += 1;
+
+        }
+
+        if (recordingState == SDCARD_WRITE_ERROR) {
+
+            *numberOfRecordingErrors += 1;
 
         }
 
@@ -1563,7 +1577,17 @@ int main(void) {
 
         /* Schedule the next recording */
 
-        if (switchPosition == AM_SWITCH_CUSTOM) {
+        if (*numberOfRecordingErrors >= MAXIMUM_NUMBER_OF_RECORDING_ERRORS) {
+
+            /* Cancel the schedule */
+
+            *timeOfNextRecording = UINT32_MAX;
+
+            *durationOfNextRecording = 0;
+
+            *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+        } else if (switchPosition == AM_SWITCH_CUSTOM) {
 
             /* Update schedule time as if the recording has ended correctly */
 
@@ -1577,11 +1601,9 @@ int main(void) {
 
             scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
 
-        }
+        } else {
 
-        /* Set parameters to start recording now */
-
-        if (switchPosition == AM_SWITCH_DEFAULT) {
+            /* Set parameters to start recording now */
 
             *timeOfNextRecording = scheduleTime;
 
@@ -1713,7 +1735,7 @@ int main(void) {
 
         if (shouldFlashLED) {
 
-            if (*recordingErrorHasOccurred) {
+            if (*numberOfRecordingErrors >= MAXIMUM_NUMBER_OF_RECORDING_ERRORS) {
 
                 FLASH_LED(Both, WAITING_LED_FLASH_DURATION);
 
