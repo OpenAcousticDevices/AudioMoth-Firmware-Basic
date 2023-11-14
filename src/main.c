@@ -24,8 +24,12 @@
 #define SECONDS_IN_HOUR                         (60 * SECONDS_IN_MINUTE)
 #define SECONDS_IN_DAY                          (24 * SECONDS_IN_HOUR)
 
+#define MINUTES_IN_DAY                          1440
 #define YEAR_OFFSET                             1900
-#define MONTH_OFFSET                            1
+#define MONTH_OFFSET                            1              
+
+#define START_OF_CENTURY                        946684800
+#define MIDPOINT_OF_CENTURY                     2524608000
 
 /* Useful type constants */
 
@@ -70,6 +74,11 @@
 
 #define MAXIMUM_WAV_FILE_SIZE                   UINT32_MAX
 
+/* Configuration file constants */
+
+#define CONFIG_BUFFER_LENGTH                    512
+#define CONFIG_TIMEZONE_LENGTH                  8
+
 /* WAV header constant */
 
 #define PCM_FORMAT                              1
@@ -79,7 +88,7 @@
 
 /* USB configuration constant */
 
-#define MAX_START_STOP_PERIODS                  5
+#define MAX_RECORDING_PERIODS         5
 
 /* Digital filter constant */
 
@@ -269,8 +278,8 @@ static wavHeader_t wavHeader = {
 
 typedef struct {
     uint16_t startMinutes;
-    uint16_t stopMinutes;
-} startStopPeriod_t;
+    uint16_t endMinutes;
+} recordingPeriod_t;
 
 typedef struct {
     uint32_t time;
@@ -283,8 +292,8 @@ typedef struct {
     uint16_t sleepDuration;
     uint16_t recordDuration;
     uint8_t enableLED;
-    uint8_t activeStartStopPeriods;
-    startStopPeriod_t startStopPeriods[MAX_START_STOP_PERIODS];
+    uint8_t activeRecordingPeriods;
+    recordingPeriod_t recordingPeriods[MAX_RECORDING_PERIODS];
     int8_t timezoneHours;
     uint8_t enableLowVoltageCutoff;
     uint8_t disableBatteryLevelDisplay;
@@ -337,13 +346,13 @@ static const configSettings_t defaultConfigSettings = {
     .sleepDuration = 5,
     .recordDuration = 55,
     .enableLED = 1,
-    .activeStartStopPeriods = 1,
-    .startStopPeriods = {
-        {.startMinutes = 0, .stopMinutes = 1440},
-        {.startMinutes = 0, .stopMinutes = 1440},
-        {.startMinutes = 0, .stopMinutes = 1440},
-        {.startMinutes = 0, .stopMinutes = 1440},
-        {.startMinutes = 0, .stopMinutes = 1440}
+    .activeRecordingPeriods = 1,
+    .recordingPeriods = {
+        {.startMinutes = 0, .endMinutes = 0},
+        {.startMinutes = 0, .endMinutes = 0},
+        {.startMinutes = 0, .endMinutes = 0},
+        {.startMinutes = 0, .endMinutes = 0},
+        {.startMinutes = 0, .endMinutes = 0}
     },
     .timezoneHours = 0,
     .enableLowVoltageCutoff = 1,
@@ -599,51 +608,55 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     struct tm time;
 
-    uint32_t length;
+    static char configBuffer[CONFIG_BUFFER_LENGTH];
 
-    static char configBuffer[512];
+    static char timezoneBuffer[CONFIG_TIMEZONE_LENGTH];
+
+    int32_t timezoneOffset = configSettings->timezoneHours * SECONDS_IN_HOUR + configSettings->timezoneMinutes * SECONDS_IN_MINUTE;
 
     RETURN_BOOL_ON_ERROR(AudioMoth_openFile("CONFIG.TXT"));
 
-    length = sprintf(configBuffer, "Device ID                       : " SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(serialNumber));
+    uint32_t length = sprintf(configBuffer, "Device ID                       : " SERIAL_NUMBER "\r\n", FORMAT_SERIAL_NUMBER(serialNumber));
 
-    length += sprintf(configBuffer + length, "Firmware                        : %s (%u.%u.%u)\n\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
+    length += sprintf(configBuffer + length, "Firmware                        : %s (%u.%u.%u)\r\n\r\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
 
     if (memcmp(deploymentID, defaultDeploymentID, DEPLOYMENT_ID_LENGTH)) {
 
-        length += sprintf(configBuffer + length, "Deployment ID                   : " SERIAL_NUMBER "\n\n", FORMAT_SERIAL_NUMBER(deploymentID));
+        length += sprintf(configBuffer + length, "Deployment ID                   : " SERIAL_NUMBER "\r\n\r\n", FORMAT_SERIAL_NUMBER(deploymentID));
 
     }
 
-    length += sprintf(configBuffer + length, "Time zone                       : UTC");
+    uint32_t timezoneLength = sprintf(timezoneBuffer, "UTC");
 
     if (configSettings->timezoneHours < 0) {
 
-        length += sprintf(configBuffer + length, "%d", configSettings->timezoneHours);
+        timezoneLength += sprintf(timezoneBuffer + timezoneLength, "%d", configSettings->timezoneHours);
 
     } else if (configSettings->timezoneHours > 0) {
 
-        length += sprintf(configBuffer + length, "+%d", configSettings->timezoneHours);
+        timezoneLength += sprintf(timezoneBuffer + timezoneLength, "+%d", configSettings->timezoneHours);
 
     } else {
 
-        if (configSettings->timezoneMinutes < 0) length += sprintf(configBuffer + length, "-%d", configSettings->timezoneHours);
+        if (configSettings->timezoneMinutes < 0) timezoneLength += sprintf(timezoneBuffer + timezoneLength, "-%d", configSettings->timezoneHours);
 
-        if (configSettings->timezoneMinutes > 0) length += sprintf(configBuffer + length, "+%d", configSettings->timezoneHours);
+        if (configSettings->timezoneMinutes > 0) timezoneLength += sprintf(timezoneBuffer + timezoneLength, "+%d", configSettings->timezoneHours);
 
     }
 
-    if (configSettings->timezoneMinutes < 0) length += sprintf(configBuffer + length, ":%02d", -configSettings->timezoneMinutes);
+    if (configSettings->timezoneMinutes < 0) timezoneLength += sprintf(timezoneBuffer + timezoneLength, ":%02d", -configSettings->timezoneMinutes);
 
-    if (configSettings->timezoneMinutes > 0) length += sprintf(configBuffer + length, ":%02d", configSettings->timezoneMinutes);
+    if (configSettings->timezoneMinutes > 0) timezoneLength += sprintf(timezoneBuffer + timezoneLength, ":%02d", configSettings->timezoneMinutes);
+
+    length += sprintf(configBuffer + length, "Time zone                       : %s", timezoneBuffer);
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\n\nSample rate (Hz)                : %lu\n", configSettings->sampleRate / configSettings->sampleRateDivider);
+    length = sprintf(configBuffer, "\r\n\r\nSample rate (Hz)                : %lu\r\n", configSettings->sampleRate / configSettings->sampleRateDivider);
 
     static char *gainSettings[5] = {"Low", "Low-Medium", "Medium", "Medium-High", "High"};
 
-    length += sprintf(configBuffer + length, "Gain                            : %s\n\n", gainSettings[configSettings->gain]);
+    length += sprintf(configBuffer + length, "Gain                            : %s\r\n\r\n", gainSettings[configSettings->gain]);
 
     length += sprintf(configBuffer + length, "Sleep duration (s)              : ");
 
@@ -657,7 +670,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     }
 
-    length += sprintf(configBuffer + length, "\nRecording duration (s)          : ");
+    length += sprintf(configBuffer + length, "\r\nRecording duration (s)          : ");
 
     if (configSettings->disableSleepRecordCycle) {
 
@@ -671,55 +684,104 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\n\nActive recording periods        : %u\n", configSettings->activeStartStopPeriods);
+    length = sprintf(configBuffer, "\r\n\r\nActive recording periods        : %u\r\n", configSettings->activeRecordingPeriods);
 
-    for (uint32_t i = 0; i < configSettings->activeStartStopPeriods; i += 1) {
+    /* Find the first recording period */
 
-        uint32_t startMinutes = configSettings->startStopPeriods[i].startMinutes;
+    uint32_t minimumIndex = 0;
 
-        uint32_t stopMinutes = configSettings->startStopPeriods[i].stopMinutes;
+    uint32_t minimumStartMinutes = UINT32_MAX;
 
-        if (i == 0) length += sprintf(configBuffer + length, "\n");
+    for (uint32_t i = 0; i < configSettings->activeRecordingPeriods; i += 1) {
 
-        length += sprintf(configBuffer + length, "Recording period %lu              : %02lu:%02lu - %02lu:%02lu (UTC)\n", i + 1, startMinutes / 60, startMinutes % 60, stopMinutes / 60, stopMinutes % 60);
+        uint32_t startMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[i].startMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+
+        if (startMinutes < minimumStartMinutes) {
+
+            minimumStartMinutes = startMinutes;
+
+            minimumIndex = i;
+
+        }
 
     }
 
-    length += sprintf(configBuffer + length, "\nEarliest recording time         : ");
+    /* Display the recording periods */
+
+    for (uint32_t i = 0; i < configSettings->activeRecordingPeriods; i += 1) {
+
+        uint32_t index = (minimumIndex + i) % configSettings->activeRecordingPeriods;
+
+        uint32_t startMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[index].startMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+
+        uint32_t endMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[index].endMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+
+        if (i == 0) length += sprintf(configBuffer + length, "\r\n");
+
+        length += sprintf(configBuffer + length, "Recording period %lu              : %02lu:%02lu - %02lu:%02lu (%s)\r\n", i + 1, startMinutes / 60, startMinutes % 60, endMinutes / 60, endMinutes % 60, timezoneBuffer);
+
+    }
+
 
     if (configSettings->earliestRecordingTime == 0) {
 
-        length += sprintf(configBuffer + length, "---------- --:--:--");
+        length += sprintf(configBuffer + length, "\r\nFirst recording date            : ----------");
 
     } else {
 
-        time_t rawTime = configSettings->earliestRecordingTime;
+        time_t rawTime = configSettings->earliestRecordingTime + timezoneOffset;
 
         gmtime_r(&rawTime, &time);
 
-        length += sprintf(configBuffer + length, "%04d-%02d-%02d %02d:%02d:%02d (UTC)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+        if (time.tm_hour == 0 && time.tm_min == 0 && time.tm_sec == 0) {
+
+            length += sprintf(configBuffer + length, "\r\nFirst recording date            : ");
+
+            length += sprintf(configBuffer + length, "%04d-%02d-%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, timezoneBuffer);
+
+        } else {
+
+            length += sprintf(configBuffer + length, "\r\nFirst recording time            : ");
+
+            length += sprintf(configBuffer + length, "%04d-%02d-%02d %02d:%02d:%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec, timezoneBuffer);
+
+        } 
 
     }
-
-    length += sprintf(configBuffer + length, "\nLatest recording time           : ");
-
+                                              
     if (configSettings->latestRecordingTime == 0) {
 
-        length += sprintf(configBuffer + length, "---------- --:--:--");
+        length += sprintf(configBuffer + length, "\r\nLast recording date             : ----------");
 
     } else {
 
-        time_t rawTime = configSettings->latestRecordingTime;
+        time_t rawTime = configSettings->latestRecordingTime + timezoneOffset;
 
         gmtime_r(&rawTime, &time);
 
-        length += sprintf(configBuffer + length, "%04d-%02d-%02d %02d:%02d:%02d (UTC)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+        if (time.tm_hour == 0 && time.tm_min == 0 && time.tm_sec == 0) {
+
+            rawTime -= SECONDS_IN_DAY;
+
+            gmtime_r(&rawTime, &time);
+
+            length += sprintf(configBuffer + length, "\r\nLast recording date             : ");
+
+            length += sprintf(configBuffer + length, "%04d-%02d-%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, timezoneBuffer);
+
+        } else {
+
+            length += sprintf(configBuffer + length, "\r\nLast recording time             : ");
+
+            length += sprintf(configBuffer + length, "%04d-%02d-%02d %02d:%02d:%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec, timezoneBuffer);
+
+        }
 
     }
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\n\nFilter                          : ");
+    length = sprintf(configBuffer, "\r\n\r\nFilter                          : ");
 
     if (configSettings->lowerFilterFreq == 0 && configSettings->higherFilterFreq == 0) {
 
@@ -743,13 +805,13 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     bool amplitudeThresholdEnabled = frequencyTriggerEnabled ? false : configSettings->amplitudeThreshold > 0 || configSettings->enableAmplitudeThresholdDecibelScale || configSettings->enableAmplitudeThresholdPercentageScale;
 
-    length += sprintf(configBuffer + length, "\n\nTrigger type                    : ");
+    length += sprintf(configBuffer + length, "\r\n\r\nTrigger type                    : ");
 
     if (frequencyTriggerEnabled) {
 
         length += sprintf(configBuffer + length, "Frequency (%u.%ukHz and window length of %u samples)", configSettings->frequencyTriggerCentreFrequency / 10, configSettings->frequencyTriggerCentreFrequency % 10, (0x01 << configSettings->frequencyTriggerWindowLengthShift));
 
-        length += sprintf(configBuffer + length, "\nThreshold setting               : ");
+        length += sprintf(configBuffer + length, "\r\nThreshold setting               : ");
 
         length += formatPercentage(configBuffer + length, configSettings->frequencyTriggerThresholdPercentageMantissa, configSettings->frequencyTriggerThresholdPercentageExponent);
 
@@ -757,7 +819,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
         length += sprintf(configBuffer + length, "Amplitude");
 
-        length += sprintf(configBuffer + length, "\nThreshold setting               : ");
+        length += sprintf(configBuffer + length, "\r\nThreshold setting               : ");
 
         if (configSettings->enableAmplitudeThresholdDecibelScale && configSettings->enableAmplitudeThresholdPercentageScale == false) {
 
@@ -777,11 +839,11 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
         length += sprintf(configBuffer + length, "-");
 
-        length += sprintf(configBuffer + length, "\nThreshold setting               : -");
+        length += sprintf(configBuffer + length, "\r\nThreshold setting               : -");
 
     }
 
-    length += sprintf(configBuffer + length, "\nMinimum trigger duration (s)    : ");
+    length += sprintf(configBuffer + length, "\r\nMinimum trigger duration (s)    : ");
 
     if (frequencyTriggerEnabled || amplitudeThresholdEnabled) {
 
@@ -795,25 +857,25 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\n\nEnable LED                      : %s\n", configSettings->enableLED ? "Yes" : "No");
+    length = sprintf(configBuffer, "\r\n\r\nEnable LED                      : %s\r\n", configSettings->enableLED ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable low-voltage cut-off      : %s\n", configSettings->enableLowVoltageCutoff ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Enable low-voltage cut-off      : %s\r\n", configSettings->enableLowVoltageCutoff ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable battery level indication : %s\n\n", configSettings->disableBatteryLevelDisplay ? "No" : configSettings->batteryLevelDisplayType == NIMH_LIPO_BATTERY_VOLTAGE ? "Yes (NiMH/LiPo voltage range)" : "Yes");
+    length += sprintf(configBuffer + length, "Enable battery level indication : %s\r\n\r\n", configSettings->disableBatteryLevelDisplay ? "No" : configSettings->batteryLevelDisplayType == NIMH_LIPO_BATTERY_VOLTAGE ? "Yes (NiMH/LiPo voltage range)" : "Yes");
 
-    length += sprintf(configBuffer + length, "Always require acoustic chime   : %s\n", configSettings->requireAcousticConfiguration ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Always require acoustic chime   : %s\r\n", configSettings->requireAcousticConfiguration ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Use daily folder for WAV files  : %s\n\n", configSettings->enableDailyFolders ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Use daily folder for WAV files  : %s\r\n\r\n", configSettings->enableDailyFolders ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Disable 48Hz DC blocking filter : %s\n", configSettings->disable48HzDCBlockingFilter ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Disable 48Hz DC blocking filter : %s\r\n", configSettings->disable48HzDCBlockingFilter ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable energy saver mode        : %s\n", configSettings->enableEnergySaverMode ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Enable energy saver mode        : %s\r\n", configSettings->enableEnergySaverMode ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable low gain range           : %s\n\n", configSettings->enableLowGainRange ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Enable low gain range           : %s\r\n\r\n", configSettings->enableLowGainRange ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable magnetic switch          : %s\n", configSettings->enableMagneticSwitch ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Enable magnetic switch          : %s\r\n", configSettings->enableMagneticSwitch ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable GPS time setting         : %s\n", configSettings->enableTimeSettingFromGPS ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Enable GPS time setting         : %s\r\n", configSettings->enableTimeSettingFromGPS ? "Yes" : "No");
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
@@ -929,7 +991,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 8, 2};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 9, 0};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -937,7 +999,7 @@ static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-
 
 static void flashLedToIndicateBatteryLife(void);
 
-static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *timeOfNextGPSTimeSetting);
+static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *startOfRecordingPeriod, uint32_t *endOfRecordingPeriod);
 
 static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t recordDuration, bool enableLED, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature, uint32_t *fileOpenTime, uint32_t *fileOpenMilliseconds);
 
@@ -987,7 +1049,7 @@ static void writeGPSLogMessage(uint32_t currentTime, uint32_t currentMillisecond
 
     gmtime_r(&rawTime, &time);
 
-    uint32_t length = sprintf(logBuffer, "%02d/%02d/%04d %02d:%02d:%02d.%03ld UTC: %s\n", time.tm_mday, MONTH_OFFSET + time.tm_mon, YEAR_OFFSET + time.tm_year, time.tm_hour, time.tm_min, time.tm_sec, currentMilliseconds, message);
+    uint32_t length = sprintf(logBuffer, "%02d/%02d/%04d %02d:%02d:%02d.%03ld UTC: %s\r\n", time.tm_mday, MONTH_OFFSET + time.tm_mon, YEAR_OFFSET + time.tm_year, time.tm_hour, time.tm_min, time.tm_sec, currentMilliseconds, message);
 
     AudioMoth_writeToFile(logBuffer, length);
 
@@ -1041,7 +1103,7 @@ static GPS_fixResult_t setTimeFromGPS(bool enableLED, uint32_t timeout) {
 
     if (result == GPS_TIMEOUT) writeGPSLogMessage(currentTime, currentMilliseconds, "Time was not updated. Timed out.");
 
-    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS powered down.\n");
+    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS powered down.\r\n");
 
     if (success) AudioMoth_closeFile();
 
@@ -1081,7 +1143,9 @@ static void stopWaitingForMagneticSwitch(uint32_t *currentTime, uint32_t *curren
 
     uint32_t scheduleTime = *currentTime + ROUNDED_UP_DIV(*currentMilliseconds + *recordingPreparationPeriod, MILLISECONDS_IN_SECOND);
 
-    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
+
+    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
 
     *waitingForMagneticSwitch = false;
 
@@ -1203,7 +1267,7 @@ int main(void) {
 
         /* Check there are active recording periods if the switch is in CUSTOM position */
 
-        *readyToMakeRecordings = switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && configSettings->activeStartStopPeriods > 0);
+        *readyToMakeRecordings = switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && configSettings->activeRecordingPeriods > 0);
 
         /* Check if acoustic configuration is required */
 
@@ -1357,7 +1421,9 @@ int main(void) {
 
                 } else {
 
-                    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+                    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
+
+                    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
 
                 }
 
@@ -1447,7 +1513,9 @@ int main(void) {
 
             uint32_t scheduleTime = currentTime + ROUNDED_UP_DIV(currentMilliseconds + *recordingPreparationPeriod, MILLISECONDS_IN_SECOND);
 
-            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
+
+            *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
 
         }
         
@@ -1599,7 +1667,9 @@ int main(void) {
 
             /* Calculate the next recording schedule */
 
-            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting);
+            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
+
+            *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
 
         } else {
 
@@ -2057,7 +2127,7 @@ inline void AudioMoth_usbApplicationPacketReceived(uint32_t messageType, uint8_t
 
         /* Copy the USB packet contents to the back-up register data structure location */
 
-        copyToBackupDomain((uint32_t*)configSettings,  (uint8_t*)&persistentConfigSettings.configSettings, sizeof(configSettings_t));
+        copyToBackupDomain((uint32_t*)configSettings, (uint8_t*)&persistentConfigSettings.configSettings, sizeof(configSettings_t));
 
         /* Copy the back-up register data structure to the USB packet */
 
@@ -2073,7 +2143,7 @@ inline void AudioMoth_usbApplicationPacketReceived(uint32_t messageType, uint8_t
             tempConfigSettings->clockDivider *= 2;
             tempConfigSettings->sampleRateDivider *= 2;
 
-        }        
+        }    
 
         /* Set the time */
 
@@ -2608,25 +2678,41 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
 /* Schedule recordings */
 
-static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *timeOfNextGPSTimeSetting) {
+static void adjustRecordingDuration(uint32_t *duration, uint32_t recordDuration, uint32_t sleepDuration) {
 
-    /* Check number of active state stop periods */
+    uint32_t durationOfCycle = recordDuration + sleepDuration;
 
-    uint32_t activeStartStopPeriods = MIN(configSettings->activeStartStopPeriods, MAX_START_STOP_PERIODS);
+    uint32_t numberOfCycles = *duration / durationOfCycle;
 
-    /* No active periods */
+    uint32_t partialCycle = *duration % durationOfCycle;
 
-    if (activeStartStopPeriods == 0) {
+    if (partialCycle == 0) {
 
-        *timeOfNextRecording = UINT32_MAX;
+        *duration = *duration > sleepDuration ? *duration - sleepDuration : 0;
 
-        *durationOfNextRecording = 0;
+    } else {
 
-        *timeOfNextGPSTimeSetting = UINT32_MAX;
-
-        goto done;
+        *duration = MIN(*duration, numberOfCycles * durationOfCycle + recordDuration);
 
     }
+
+}
+
+static void calculateStartAndDuration(uint32_t currentTime, uint32_t currentSeconds, recordingPeriod_t *period, uint32_t *startTime, uint32_t *duration) {
+
+    *startTime = currentTime - currentSeconds + SECONDS_IN_MINUTE * period->startMinutes;
+
+    *duration = period->endMinutes <= period->startMinutes ? MINUTES_IN_DAY + period->endMinutes - period->startMinutes : period->endMinutes - period->startMinutes;
+    
+    *duration *= SECONDS_IN_MINUTE;
+
+}
+
+static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *startOfRecordingPeriod, uint32_t *endOfRecordingPeriod) {
+
+    /* Enforce minumum schedule date */
+    
+    currentTime = MAX(currentTime, START_OF_CENTURY);
 
     /* Check if recording should be limited by earliest recording time */
 
@@ -2636,155 +2722,153 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     }
 
-    /* Calculate the number of seconds of this day */
+    /* No suitable recording periods */
 
-    struct tm time;
+    uint32_t activeRecordingPeriods = MIN(configSettings->activeRecordingPeriods, MAX_RECORDING_PERIODS);
+
+    if (activeRecordingPeriods == 0) {
+
+        *timeOfNextRecording = UINT32_MAX;
+
+        if (startOfRecordingPeriod) *startOfRecordingPeriod = UINT32_MAX;
+
+        if (endOfRecordingPeriod) *endOfRecordingPeriod = UINT32_MAX;
+
+        *durationOfNextRecording = 0;
+
+        return;
+
+    }
+
+    /* Calculate the number of seconds of this day */
 
     time_t rawTime = currentTime;
 
-    gmtime_r(&rawTime, &time);
+    struct tm *time = gmtime(&rawTime);
 
-    uint32_t currentSeconds = SECONDS_IN_HOUR * time.tm_hour + SECONDS_IN_MINUTE * time.tm_min + time.tm_sec;
+    uint32_t currentSeconds = SECONDS_IN_HOUR * time->tm_hour + SECONDS_IN_MINUTE * time->tm_min + time->tm_sec;
 
-    /* Check each active start stop period */
+    /* Check the last active period on the previous day */
 
-    for (uint32_t i = 0; i < activeStartStopPeriods; i += 1) {
+    recordingPeriod_t *lastPeriod = configSettings->recordingPeriods + configSettings->activeRecordingPeriods - 1;
 
-        startStopPeriod_t *period = configSettings->startStopPeriods + i;
+    uint32_t startTime, duration;
+    
+    calculateStartAndDuration(currentTime - SECONDS_IN_DAY, currentSeconds, lastPeriod, &startTime, &duration);
 
-        /* Calculate the start and stop time of the current period */
+    if (configSettings->disableSleepRecordCycle == false) {
+    
+        adjustRecordingDuration(&duration, configSettings->recordDuration, configSettings->sleepDuration);
 
-        uint32_t startSeconds = SECONDS_IN_MINUTE * period->startMinutes;
+    }
 
-        uint32_t stopSeconds = SECONDS_IN_MINUTE * period->stopMinutes;
+    if (currentTime < startTime + duration && duration > 0) goto done;
 
-        uint32_t durationOfStartStopPeriod = stopSeconds - startSeconds;
+    /* Check each active recording period on the same day*/
 
-        /* Calculate the start time of this start stop period */
+    for (uint32_t i = 0; i < activeRecordingPeriods; i += 1) {
 
-        *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? currentTime + startSeconds - currentSeconds - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+        recordingPeriod_t *currentPeriod = configSettings->recordingPeriods + i;
 
-        /* Check if the start stop period has not yet started */
+        calculateStartAndDuration(currentTime, currentSeconds, currentPeriod, &startTime, &duration);
 
-        if (currentSeconds <= startSeconds) {
-
-            *timeOfNextRecording = currentTime + startSeconds - currentSeconds;
-
-            if (configSettings->disableSleepRecordCycle) {
-
-                *durationOfNextRecording = durationOfStartStopPeriod;
-
-            } else {
-
-                *durationOfNextRecording = MIN(configSettings->recordDuration, durationOfStartStopPeriod);
-
-            }
-
-            goto done;
+        if (configSettings->disableSleepRecordCycle == false) {
+        
+            adjustRecordingDuration(&duration, configSettings->recordDuration, configSettings->sleepDuration);
 
         }
-
-        /* Check if currently inside a start stop period */
-
-        if (currentSeconds < stopSeconds) {
-
-            /* Handle case with no sleep record cycle */
-
-            uint32_t secondsFromStartOfPeriod = currentSeconds - startSeconds;
-
-            if (configSettings->disableSleepRecordCycle) {
-
-                *timeOfNextRecording = currentTime;
-
-                *durationOfNextRecording = durationOfStartStopPeriod - secondsFromStartOfPeriod;;
-
-                goto done;
-
-            }
-
-            /* Check if recording should start immediately */
-
-            uint32_t durationOfCycle = configSettings->recordDuration + configSettings->sleepDuration;
-
-            uint32_t partialCycle = secondsFromStartOfPeriod % durationOfCycle;
-
-            if (partialCycle < configSettings->recordDuration) {
-
-                *timeOfNextRecording = currentTime;
-
-                *durationOfNextRecording = MIN(configSettings->recordDuration - partialCycle, durationOfStartStopPeriod - secondsFromStartOfPeriod);
-
-                goto done;
-
-            }
-
-            /* Wait for next cycle to begin */
-
-            secondsFromStartOfPeriod += durationOfCycle - partialCycle;
-
-            if (secondsFromStartOfPeriod < durationOfStartStopPeriod) {
-
-                *timeOfNextRecording = currentTime + durationOfCycle - partialCycle;
-
-                *durationOfNextRecording = MIN(configSettings->recordDuration, durationOfStartStopPeriod - secondsFromStartOfPeriod);
-
-                goto done;
-
-            }
-
-        }
+        
+        if (currentTime < startTime + duration && duration > 0) goto done;
 
     }
 
     /* Calculate time until first period tomorrow */
 
-    startStopPeriod_t *firstPeriod = configSettings->startStopPeriods;
+    recordingPeriod_t *firstPeriod = configSettings->recordingPeriods;
 
-    uint32_t startSeconds = SECONDS_IN_MINUTE * firstPeriod->startMinutes;
+    calculateStartAndDuration(currentTime + SECONDS_IN_DAY, currentSeconds, firstPeriod, &startTime, &duration);
 
-    uint32_t stopSeconds = SECONDS_IN_MINUTE * firstPeriod->stopMinutes;
-
-    uint32_t durationOfStartStopPeriod = stopSeconds - startSeconds;
-
-    *timeOfNextRecording = currentTime + (SECONDS_IN_DAY - currentSeconds) + startSeconds;
-
-    if (configSettings->disableSleepRecordCycle) {
-
-        *durationOfNextRecording = durationOfStartStopPeriod;
-
-    } else {
-
-        *durationOfNextRecording = MIN(configSettings->recordDuration, durationOfStartStopPeriod);
+    if (configSettings->disableSleepRecordCycle == false) {
+    
+        adjustRecordingDuration(&duration, configSettings->recordDuration, configSettings->sleepDuration);
 
     }
 
-    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextRecording - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
-
 done:
 
-    /* Check if recording should be limited by last recording time */
+    /* Set the time for start and end of the recording period */
 
-    if (configSettings->latestRecordingTime > 0) {
+    if (startOfRecordingPeriod) *startOfRecordingPeriod = startTime;
 
-        if (*timeOfNextRecording >= configSettings->latestRecordingTime) {
+    if (endOfRecordingPeriod) *endOfRecordingPeriod = startTime + duration;
 
-            *timeOfNextRecording = UINT32_MAX;
+    /* Resolve sleep and record cycle */
 
-            *durationOfNextRecording = 0;
+    if (configSettings->disableSleepRecordCycle) {
 
-            *timeOfNextGPSTimeSetting = UINT32_MAX;
+        *timeOfNextRecording = startTime;
+
+        *durationOfNextRecording = duration;
+
+    } else {
+        
+        if (currentTime <= startTime) {
+
+            /* Recording should start at the start of the recording period */
+
+            *timeOfNextRecording = startTime;
+
+            *durationOfNextRecording = MIN(duration, configSettings->recordDuration);
 
         } else {
 
-            int64_t excessTime = (int64_t)*timeOfNextRecording + (int64_t)*durationOfNextRecording - (int64_t)configSettings->latestRecordingTime;
+            /* Recording should start immediately or at the start of the next recording cycle */
 
-            if (excessTime > 0) {
+            uint32_t secondsFromStartOfPeriod = currentTime - startTime;
 
-                *durationOfNextRecording -= excessTime;
+            uint32_t durationOfCycle = configSettings->recordDuration + configSettings->sleepDuration;
+
+            uint32_t partialCycle = secondsFromStartOfPeriod % durationOfCycle;
+
+            *timeOfNextRecording = currentTime - partialCycle;
+
+            if (partialCycle >= configSettings->recordDuration) {
+
+                /* Wait for next cycle to begin */
+
+                *timeOfNextRecording += durationOfCycle;
 
             }
 
+            uint32_t remainingDuration = startTime + duration - *timeOfNextRecording;
+
+            *durationOfNextRecording = MIN(configSettings->recordDuration, remainingDuration);
+
         }
+
+    }
+
+    /* Check if recording should be limited by last recording time */
+
+    uint32_t latestRecordingTime = configSettings->latestRecordingTime > 0 ? configSettings->latestRecordingTime : MIDPOINT_OF_CENTURY;
+
+    if (*timeOfNextRecording >= latestRecordingTime) {
+
+        *timeOfNextRecording = UINT32_MAX;
+
+        if (startOfRecordingPeriod) *startOfRecordingPeriod = UINT32_MAX;
+
+        if (endOfRecordingPeriod) *endOfRecordingPeriod = UINT32_MAX;
+
+        *durationOfNextRecording = 0;
+
+    } else {
+
+        int64_t excessTime = (int64_t)*timeOfNextRecording + (int64_t)*durationOfNextRecording - (int64_t)latestRecordingTime;
+
+        if (excessTime > 0) *durationOfNextRecording -= excessTime;
+
+        if (endOfRecordingPeriod) *endOfRecordingPeriod = *timeOfNextRecording + *durationOfNextRecording;
 
     }
 
