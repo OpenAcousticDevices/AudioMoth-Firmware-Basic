@@ -88,7 +88,7 @@
 
 /* USB configuration constant */
 
-#define MAX_RECORDING_PERIODS         5
+#define MAX_RECORDING_PERIODS                   5
 
 /* Digital filter constant */
 
@@ -722,7 +722,6 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     }
 
-
     if (configSettings->earliestRecordingTime == 0) {
 
         length += sprintf(configBuffer + length, "\r\nFirst recording date            : ----------");
@@ -991,7 +990,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 9, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 9, 3};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -2848,6 +2847,16 @@ done:
 
     }
 
+    /* Update start time and duration is recording period has started */
+
+    if (currentTime > *timeOfNextRecording) {
+
+        *durationOfNextRecording -= currentTime - *timeOfNextRecording;
+
+        *timeOfNextRecording = currentTime;
+        
+    }
+
     /* Check if recording should be limited by last recording time */
 
     uint32_t latestRecordingTime = configSettings->latestRecordingTime > 0 ? configSettings->latestRecordingTime : MIDPOINT_OF_CENTURY;
@@ -2866,9 +2875,13 @@ done:
 
         int64_t excessTime = (int64_t)*timeOfNextRecording + (int64_t)*durationOfNextRecording - (int64_t)latestRecordingTime;
 
-        if (excessTime > 0) *durationOfNextRecording -= excessTime;
+        if (excessTime > 0) {
+            
+            *durationOfNextRecording -= excessTime;
 
-        if (endOfRecordingPeriod) *endOfRecordingPeriod = *timeOfNextRecording + *durationOfNextRecording;
+            if (endOfRecordingPeriod) *endOfRecordingPeriod = *timeOfNextRecording + *durationOfNextRecording;
+
+        }
 
     }
 
