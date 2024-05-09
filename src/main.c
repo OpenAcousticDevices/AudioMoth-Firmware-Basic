@@ -12,6 +12,7 @@
 #include <stdbool.h>
 
 #include "gps.h"
+#include "sunrise.h"
 #include "audiomoth.h"
 #include "audioconfig.h"
 #include "digitalfilter.h"
@@ -24,12 +25,17 @@
 #define SECONDS_IN_HOUR                         (60 * SECONDS_IN_MINUTE)
 #define SECONDS_IN_DAY                          (24 * SECONDS_IN_HOUR)
 
+#define MINUTES_IN_HOUR                         60
 #define MINUTES_IN_DAY                          1440
 #define YEAR_OFFSET                             1900
 #define MONTH_OFFSET                            1              
 
 #define START_OF_CENTURY                        946684800
 #define MIDPOINT_OF_CENTURY                     2524608000
+
+/* Useful coordinate constant */
+
+#define MINUTES_IN_DEGREE                       60
 
 /* Useful type constants */
 
@@ -111,6 +117,10 @@
 
 #define DEPLOYMENT_ID_LENGTH                    8
 
+/* Acoustic location constant */
+
+#define ACOUSTIC_LOCATION_SIZE_IN_BYTES         7
+
 /* Audio configuration constants */
 
 #define AUDIO_CONFIG_PULSE_INTERVAL             10
@@ -150,6 +160,19 @@
 
 #define FREQUENCY_TRIGGER_WINDOW_MINIMUM        16
 #define FREQUENCY_TRIGGER_WINDOW_MAXIMUM        1024
+
+/* Sunrise and sunset recording constants */
+
+#define MINIMUM_SUN_RECORDING_GAP               60
+#define SUN_RECORDING_GAP_MULTIPLIER            4
+
+/* Location constants */
+
+#define ACOUSTIC_LONGITUDE_MULTIPLIER           2
+
+#define CONFIG_LOCATION_PRECISION               100
+#define ACOUSTIC_LOCATION_PRECISION             1000000
+#define GPS_LOCATION_PRECISION                  1000000
 
 /* Useful macros */
 
@@ -206,6 +229,8 @@
 
 #define ROUND_UP_TO_MULTIPLE(a, b)              (((a) + (b) - 1) & ~((b)-1))
 
+#define UNSIGNED_ROUND(n, d)                    ((d) * (((n) + (d) / 2) / (d)))
+
 /* Recording state enumeration */
 
 typedef enum {RECORDING_OKAY, FILE_SIZE_LIMITED, SUPPLY_VOLTAGE_LOW, SWITCH_CHANGED, MICROPHONE_CHANGED, MAGNETIC_SWITCH, SDCARD_WRITE_ERROR} AM_recordingState_t;
@@ -217,6 +242,10 @@ typedef enum {NO_FILTER, LOW_PASS_FILTER, BAND_PASS_FILTER, HIGH_PASS_FILTER} AM
 /* Battery level display type */
 
 typedef enum {BATTERY_LEVEL, NIMH_LIPO_BATTERY_VOLTAGE} AM_batteryLevelDisplayType_t;
+
+/* Sun recording mode enumeration */
+
+typedef enum {SUNRISE_RECORDING, SUNSET_RECORDING, SUNRISE_AND_SUNSET_RECORDING, SUNSET_TO_SUNRISE_RECORDING, SUNRISE_TO_SUNSET_RECORDING} AM_sunRecordingMode_t;
 
 /* WAV header */
 
@@ -292,8 +321,24 @@ typedef struct {
     uint16_t sleepDuration;
     uint16_t recordDuration;
     uint8_t enableLED;
-    uint8_t activeRecordingPeriods;
-    recordingPeriod_t recordingPeriods[MAX_RECORDING_PERIODS];
+    union {
+        struct {
+            uint8_t activeRecordingPeriods;
+            recordingPeriod_t recordingPeriods[MAX_RECORDING_PERIODS];
+        };
+        struct {
+            uint8_t sunRecordingMode : 3;
+            uint8_t sunRecordingEvent : 2;
+            int16_t latitude;
+            int16_t longitude;
+            uint8_t sunRoundingMinutes;
+            uint16_t beforeSunriseMinutes : 10;
+            uint16_t afterSunriseMinutes : 10;
+            uint16_t beforeSunsetMinutes : 10;
+            uint16_t afterSunsetMinutes : 10;
+            
+        };
+    };
     int8_t timezoneHours;
     uint8_t enableLowVoltageCutoff;
     uint8_t disableBatteryLevelDisplay;
@@ -331,6 +376,7 @@ typedef struct {
     uint8_t enableLowGainRange : 1;
     uint8_t enableFrequencyTrigger : 1;
     uint8_t enableDailyFolders : 1;
+    uint8_t enableSunRecording : 1;
 } configSettings_t;
 
 #pragma pack(pop)
@@ -378,7 +424,8 @@ static const configSettings_t defaultConfigSettings = {
     .enableMagneticSwitch = 0,
     .enableLowGainRange = 0,
     .enableFrequencyTrigger = 0,
-    .enableDailyFolders = 0
+    .enableDailyFolders = 0,
+    .enableSunRecording = 0
 };
 
 /* Persistent configuration data structure */
@@ -390,6 +437,17 @@ typedef struct {
     uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH];
     configSettings_t configSettings;
 } persistentConfigSettings_t;
+
+#pragma pack(pop)
+
+/* Acoustic location data structure */
+
+#pragma pack(push, 1)
+
+typedef struct {
+    int32_t latitude: 28;
+    int32_t longitude: 28;
+} acousticLocation_t;
 
 #pragma pack(pop)
 
@@ -423,12 +481,12 @@ static uint32_t formatPercentage(char *dest, uint32_t mantissa, int32_t exponent
 
 /* Functions to set WAV header details and comment */
 
-static void setHeaderDetails(wavHeader_t *wavHeader, uint32_t sampleRate, uint32_t numberOfSamples) {
+static void setHeaderDetails(wavHeader_t *wavHeader, uint32_t sampleRate, uint32_t numberOfSamples, uint32_t guanoHeaderSize) {
 
     wavHeader->wavFormat.samplesPerSecond = sampleRate;
     wavHeader->wavFormat.bytesPerSecond = NUMBER_OF_BYTES_IN_SAMPLE * sampleRate;
     wavHeader->data.size = NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples;
-    wavHeader->riff.size = NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples + sizeof(wavHeader_t) - sizeof(chunk_t);
+    wavHeader->riff.size = NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples + sizeof(wavHeader_t) + guanoHeaderSize - sizeof(chunk_t);
 
 }
 
@@ -602,11 +660,93 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
 }
 
-/* Function to write configuration to file */
+/* Function to write the GUANO data */
 
-static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID) {
+static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, uint32_t currentTime, uint32_t *gpsLocationReceived, int32_t *gpsLastFixLatitude, int32_t *gpsLastFixLongitude, uint32_t *acousticLocationReceived, int32_t *acousticLatitude, int32_t *acousticLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID, char *filename, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature) {
+
+    uint32_t length = sprintf(buffer, "guan");
+    
+    length += UINT32_SIZE_IN_BYTES;
+    
+    length += sprintf(buffer + length, "GUANO|Version:1.0\nMake:Open Acoustic Devices\nModel:AudioMoth\nSerial:" SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(serialNumber));
+
+    if (memcmp(deploymentID, defaultDeploymentID, DEPLOYMENT_ID_LENGTH)) {
+
+        length += sprintf(buffer + length, "OAD|Deployment ID:" SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(deploymentID));
+
+    }
+
+    length += sprintf(buffer + length, "Firmware Version:%s (%u.%u.%u)\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
+
+    int32_t timezoneOffset = configSettings->timezoneHours * SECONDS_IN_HOUR + configSettings->timezoneMinutes * SECONDS_IN_MINUTE;
+
+    time_t rawTime = currentTime + timezoneOffset;
 
     struct tm time;
+
+    gmtime_r(&rawTime, &time);
+
+    length += sprintf(buffer + length, "Timestamp:%04d-%02d-%02dT%02d:%02d:%02d", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec);
+
+    if (timezoneOffset == 0) {
+
+        length += sprintf(buffer + length, "Z\n");
+        
+    } else if (timezoneOffset < 0) {
+
+        length += sprintf(buffer + length, "-%02d:%02d\n", ABS(configSettings->timezoneHours), ABS(configSettings->timezoneMinutes));
+
+    } else {
+
+        length += sprintf(buffer + length, "+%02d:%02d\n", configSettings->timezoneHours, configSettings->timezoneMinutes);
+
+    }
+
+    if (*gpsLocationReceived || *acousticLocationReceived || configSettings->enableSunRecording) {
+
+        int32_t latitude = *gpsLocationReceived ? *gpsLastFixLatitude : *acousticLocationReceived ? *acousticLatitude : configSettings->latitude;
+
+        int32_t longitude = *gpsLocationReceived ? *gpsLastFixLongitude : *acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
+
+        if (*gpsLocationReceived) {
+
+            length += sprintf(buffer + length, "Loc Position:%ld.%06ld %ld.%06ld\nOAD|Loc Source:GPS\n", latitude / GPS_LOCATION_PRECISION, ABS(latitude) % GPS_LOCATION_PRECISION, longitude / GPS_LOCATION_PRECISION, ABS(longitude) % GPS_LOCATION_PRECISION);
+
+        } else if (*acousticLocationReceived) {
+
+            length += sprintf(buffer + length, "Loc Position:%ld.%06ld %ld.%06ld\nOAD|Loc Source:Acoustic chime\n", latitude / ACOUSTIC_LOCATION_PRECISION, ABS(latitude) % ACOUSTIC_LOCATION_PRECISION, longitude / ACOUSTIC_LOCATION_PRECISION, ABS(longitude) % ACOUSTIC_LOCATION_PRECISION);
+
+        } else {
+
+            length += sprintf(buffer + length, "Loc Position:%ld.%02ld %ld.%02ld\nOAD|Loc Source:Configuration app\n", latitude / CONFIG_LOCATION_PRECISION, ABS(latitude) % CONFIG_LOCATION_PRECISION, longitude / CONFIG_LOCATION_PRECISION, ABS(longitude) % CONFIG_LOCATION_PRECISION);
+
+        }
+
+    }
+
+    char *start = strchr(filename, '/');
+
+    length += sprintf(buffer + length, "Original Filename:%s\n", start ? start + 1 : filename);
+
+    uint32_t batteryVoltage = extendedBatteryState == AM_EXT_BAT_LOW ? 24 : extendedBatteryState >= AM_EXT_BAT_FULL ? 50 : extendedBatteryState + AM_EXT_BAT_STATE_OFFSET / AM_BATTERY_STATE_INCREMENT;
+
+    length += sprintf(buffer + length, "OAD|Battery Voltage:%01lu.%01lu\n", batteryVoltage / 10, batteryVoltage % 10);
+    
+    char *sign = temperature < 0 ? "-" : "";
+
+    uint32_t temperatureInDecidegrees = ROUNDED_DIV(ABS(temperature), 100);
+
+    length += sprintf(buffer + length, "Temperature Int:%s%lu.%lu", sign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
+    
+    *(uint32_t*)(buffer + RIFF_ID_LENGTH) = length - sizeof(chunk_t);;
+
+    return length;
+
+}
+
+/* Function to write configuration to file */
+
+static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t currentTime, uint32_t *gpsLocationReceived, int32_t *gpsLatitude, int32_t *gpsLongitude, uint32_t *acousticLocationReceived, int32_t *acousticLatitude, int32_t *acousticLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID) {
 
     static char configBuffer[CONFIG_BUFFER_LENGTH];
 
@@ -648,7 +788,13 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     if (configSettings->timezoneMinutes > 0) timezoneLength += sprintf(timezoneBuffer + timezoneLength, ":%02d", configSettings->timezoneMinutes);
 
-    length += sprintf(configBuffer + length, "Time zone                       : %s", timezoneBuffer);
+    time_t rawTime = currentTime + timezoneOffset;
+
+    struct tm time;
+
+    gmtime_r(&rawTime, &time);
+
+    length += sprintf(configBuffer + length, "Device time                     : %04d-%02d-%02d %02d:%02d:%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec, timezoneBuffer);
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
@@ -684,47 +830,128 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint8_t *
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
-    length = sprintf(configBuffer, "\r\n\r\nActive recording periods        : %u\r\n", configSettings->activeRecordingPeriods);
+    if (configSettings->enableSunRecording) {
 
-    /* Find the first recording period */
+        int32_t latitude = *gpsLocationReceived ? *gpsLatitude : *acousticLocationReceived ? *acousticLatitude : configSettings->latitude;
 
-    uint32_t minimumIndex = 0;
+        int32_t longitude = *gpsLocationReceived ? *gpsLongitude : *acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
 
-    uint32_t minimumStartMinutes = UINT32_MAX;
+        char latitudeDirection = latitude < 0 ? 'S' : 'N';
 
-    for (uint32_t i = 0; i < configSettings->activeRecordingPeriods; i += 1) {
+        char longitudeDirection = longitude < 0 ? 'W' : 'E';
 
-        uint32_t startMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[i].startMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+        if (*gpsLocationReceived) {
 
-        if (startMinutes < minimumStartMinutes) {
+            length = sprintf(configBuffer, "\r\n\r\nLocation                        : %ld.%06ld°%c %ld.%06ld°%c (GPS)", ABS(latitude) / GPS_LOCATION_PRECISION, ABS(latitude) % GPS_LOCATION_PRECISION, latitudeDirection, ABS(longitude) / GPS_LOCATION_PRECISION, ABS(longitude) % GPS_LOCATION_PRECISION, longitudeDirection);
 
-            minimumStartMinutes = startMinutes;
+        } else if (*acousticLocationReceived) {
 
-            minimumIndex = i;
+            length = sprintf(configBuffer, "\r\n\r\nLocation                        : %ld.%06ld°%c %ld.%06ld°%c (Acoustic chime)", ABS(latitude) / ACOUSTIC_LOCATION_PRECISION, ABS(latitude) % ACOUSTIC_LOCATION_PRECISION, latitudeDirection, ABS(longitude) / ACOUSTIC_LOCATION_PRECISION, ABS(longitude) % ACOUSTIC_LOCATION_PRECISION, longitudeDirection);
+
+        } else {
+
+            length = sprintf(configBuffer, "\r\n\r\nLocation                        : %ld.%02ld°%c %ld.%02ld°%c (Configuration app)", ABS(latitude) / CONFIG_LOCATION_PRECISION, ABS(latitude) % CONFIG_LOCATION_PRECISION, latitudeDirection, ABS(longitude) / CONFIG_LOCATION_PRECISION, ABS(longitude) % CONFIG_LOCATION_PRECISION, longitudeDirection);
+
+        }
+
+        static char* twilightTypes[3] = {"Civil", "Nautical", "Astronomical"};
+
+        static char* dawnDuskModes[5] = {"dawn", "dusk", "dawn and dusk", "dusk to dawn", "dawn to dusk"};
+
+        static char* sunriseSunsetModes[5] = {"Sunrise", "Sunset", "Sunrise and sunset", "Sunset to sunrise", "Sunrise to sunset"};
+
+        length += sprintf(configBuffer + length, "\r\nSun recording mode              : ");
+        
+        if (configSettings->sunRecordingEvent == 0) {
+
+            length += sprintf(configBuffer + length, "%s", sunriseSunsetModes[configSettings->sunRecordingMode]);
+
+        } else {
+
+            length += sprintf(configBuffer + length, "%s %s", twilightTypes[configSettings->sunRecordingEvent - 1], dawnDuskModes[configSettings->sunRecordingMode]);
+
+        }
+
+        char *sunriseText = configSettings->sunRecordingEvent == 0 ? "\r\nSunrise - before, after (mins)  " : "\r\nDawn - before, after (mins)     ";
+
+        char *sunsetText = configSettings->sunRecordingEvent == 0 ? "\r\nSunset - before, after (mins)   " : "\r\nDusk - before, after (mins)     ";
+
+        if (configSettings->sunRecordingMode == SUNRISE_RECORDING) {
+
+            length += sprintf(configBuffer + length, "%s: %u, %u", sunriseText, configSettings->beforeSunriseMinutes, configSettings->afterSunriseMinutes);
+            length += sprintf(configBuffer + length, "%s: -, -", sunsetText);
+            
+        } else if (configSettings->sunRecordingMode == SUNSET_RECORDING) {
+
+            length += sprintf(configBuffer + length, "%s: -, -", sunriseText);
+            length += sprintf(configBuffer + length, "%s: %u, %u", sunsetText, configSettings->beforeSunsetMinutes, configSettings->afterSunsetMinutes);
+
+        } else if (configSettings->sunRecordingMode == SUNRISE_AND_SUNSET_RECORDING) {
+
+            length += sprintf(configBuffer + length, "%s: %u, %u", sunriseText, configSettings->beforeSunriseMinutes, configSettings->afterSunriseMinutes);
+            length += sprintf(configBuffer + length, "%s: %u, %u", sunsetText, configSettings->beforeSunsetMinutes, configSettings->afterSunsetMinutes);
+
+        } else if (configSettings->sunRecordingMode == SUNSET_TO_SUNRISE_RECORDING) {
+
+            length += sprintf(configBuffer + length, "%s: -, %u", sunriseText, configSettings->afterSunriseMinutes);
+            length += sprintf(configBuffer + length, "%s: %u, -", sunsetText, configSettings->beforeSunsetMinutes);
+
+        } else if (configSettings->sunRecordingMode == SUNRISE_TO_SUNSET_RECORDING) {
+
+            length += sprintf(configBuffer + length, "%s: %u, -", sunriseText, configSettings->beforeSunriseMinutes);
+            length += sprintf(configBuffer + length, "%s: -, %u", sunsetText, configSettings->afterSunsetMinutes);
+
+        }
+
+        char *roundingText = configSettings->sunRecordingEvent == 0 ? "\r\nSunrise/sunset rounding (mins)  : %u" : "\r\nDawn/dusk rounding (mins)       : %u";
+
+        length += sprintf(configBuffer + length, roundingText, configSettings->sunRoundingMinutes);
+
+    } else {
+
+        length = sprintf(configBuffer, "\r\n\r\nActive recording periods        : %u\r\n", configSettings->activeRecordingPeriods);
+
+        /* Find the first recording period */
+
+        uint32_t minimumIndex = 0;
+
+        uint32_t minimumStartMinutes = UINT32_MAX;
+
+        for (uint32_t i = 0; i < configSettings->activeRecordingPeriods; i += 1) {
+
+            uint32_t startMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[i].startMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+
+            if (startMinutes < minimumStartMinutes) {
+
+                minimumStartMinutes = startMinutes;
+
+                minimumIndex = i;
+
+            }
+
+        }
+    
+        /* Display the recording periods */
+
+        for (uint32_t i = 0; i < configSettings->activeRecordingPeriods; i += 1) {
+
+            uint32_t index = (minimumIndex + i) % configSettings->activeRecordingPeriods;
+
+            uint32_t startMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[index].startMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+
+            uint32_t endMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[index].endMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
+
+            length += sprintf(configBuffer + length, "\r\nRecording period %lu              : %02lu:%02lu - %02lu:%02lu (%s)", i + 1, startMinutes / MINUTES_IN_HOUR, startMinutes % MINUTES_IN_HOUR, endMinutes / MINUTES_IN_HOUR, endMinutes % MINUTES_IN_HOUR, timezoneBuffer);
 
         }
 
     }
 
-    /* Display the recording periods */
-
-    for (uint32_t i = 0; i < configSettings->activeRecordingPeriods; i += 1) {
-
-        uint32_t index = (minimumIndex + i) % configSettings->activeRecordingPeriods;
-
-        uint32_t startMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[index].startMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
-
-        uint32_t endMinutes = (MINUTES_IN_DAY + configSettings->recordingPeriods[index].endMinutes + timezoneOffset / SECONDS_IN_MINUTE) % MINUTES_IN_DAY;
-
-        if (i == 0) length += sprintf(configBuffer + length, "\r\n");
-
-        length += sprintf(configBuffer + length, "Recording period %lu              : %02lu:%02lu - %02lu:%02lu (%s)\r\n", i + 1, startMinutes / 60, startMinutes % 60, endMinutes / 60, endMinutes % 60, timezoneBuffer);
-
-    }
+    RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
     if (configSettings->earliestRecordingTime == 0) {
 
-        length += sprintf(configBuffer + length, "\r\nFirst recording date            : ----------");
+        length = sprintf(configBuffer, "\r\n\r\nFirst recording date            : ----------");
 
     } else {
 
@@ -890,27 +1117,53 @@ static uint32_t *previousSwitchPosition = (uint32_t*)AM_BACKUP_DOMAIN_START_ADDR
 
 static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 4);
 
-static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
+static uint32_t *indexOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
 
-static uint32_t *timeOfNextGPSTimeSetting = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
+static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
 
-static uint32_t *writtenConfigurationToFile = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
+static uint32_t *timeOfNextGPSTimeSetting = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
 
-static uint8_t *deploymentID = (uint8_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
+static uint32_t *writtenConfigurationToFile = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
 
-static uint32_t *readyToMakeRecordings = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 28);
+static uint8_t *deploymentID = (uint8_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 24);
 
-static uint32_t *shouldSetTimeFromGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
+static uint32_t *readyToMakeRecordings = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
 
-static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+static uint32_t *shouldSetTimeFromGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
 
-static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
+static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
 
-static uint32_t *waitingForMagneticSwitch = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
+static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
 
-static uint32_t *poweredDownWithShortWaitInterval = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
+static uint32_t *waitingForMagneticSwitch = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
 
-static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
+static uint32_t *poweredDownWithShortWaitInterval = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
+
+static int32_t *gpsLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 56);
+
+static int32_t *gpsLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 60);
+
+static int32_t *gpsLastFixLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 64);
+
+static int32_t *gpsLastFixLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 68);
+
+static uint32_t *gpsLocationReceived = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 72);
+
+static int32_t *acousticLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 76);
+
+static int32_t *acousticLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 80);
+
+static uint32_t *acousticLocationReceived = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 84);
+
+static uint32_t *numberOfSunRecordingPeriods = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 88);
+
+static recordingPeriod_t *firstSunRecordingPeriod = (recordingPeriod_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 92);
+
+static recordingPeriod_t *secondSunRecordingPeriod = (recordingPeriod_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 96);
+
+static uint32_t *timeOfNextSunriseSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 100);
+
+static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 104);
 
 /* Filter variables */
 
@@ -990,17 +1243,23 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 9, 3};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 10, 0};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
 /* Function prototypes */
 
-static void flashLedToIndicateBatteryLife(void);
-
-static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *startOfRecordingPeriod, uint32_t *endOfRecordingPeriod);
-
 static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t recordDuration, bool enableLED, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature, uint32_t *fileOpenTime, uint32_t *fileOpenMilliseconds);
+
+static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *indexOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *startOfRecordingPeriod, uint32_t *endOfRecordingPeriod);
+
+static void determineTimeOfNextSunriseSunsetCalculation(uint32_t currentTime, uint32_t *timeOfNextSunriseSunsetCalculation);
+
+static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentTime);
+
+static void determineSunriseAndSunsetTimes(uint32_t currentTime);
+
+static void flashLedToIndicateBatteryLife(void);
 
 /* Functions of copy to and from the backup domain */
 
@@ -1048,7 +1307,7 @@ static void writeGPSLogMessage(uint32_t currentTime, uint32_t currentMillisecond
 
     gmtime_r(&rawTime, &time);
 
-    uint32_t length = sprintf(logBuffer, "%02d/%02d/%04d %02d:%02d:%02d.%03ld UTC: %s\r\n", time.tm_mday, MONTH_OFFSET + time.tm_mon, YEAR_OFFSET + time.tm_year, time.tm_hour, time.tm_min, time.tm_sec, currentMilliseconds, message);
+    uint32_t length = sprintf(logBuffer, "%02d/%02d/%04d %02d:%02d:%02d.%03lu UTC: %s\r\n", time.tm_mday, MONTH_OFFSET + time.tm_mon, YEAR_OFFSET + time.tm_year, time.tm_hour, time.tm_min, time.tm_sec, currentMilliseconds, message);
 
     AudioMoth_writeToFile(logBuffer, length);
 
@@ -1122,6 +1381,8 @@ static void startWaitingForMagneticSwitch() {
 
     *timeOfNextRecording = UINT32_MAX;
 
+    *indexOfNextRecording = 0;
+
     *durationOfNextRecording = UINT32_MAX;
 
     *timeOfNextGPSTimeSetting = UINT32_MAX;
@@ -1142,9 +1403,7 @@ static void stopWaitingForMagneticSwitch(uint32_t *currentTime, uint32_t *curren
 
     uint32_t scheduleTime = *currentTime + ROUNDED_UP_DIV(*currentMilliseconds + *recordingPreparationPeriod, MILLISECONDS_IN_SECOND);
 
-    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
-
-    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+    determineSunriseAndSunsetTimesAndScheduleRecording(scheduleTime);
 
     *waitingForMagneticSwitch = false;
 
@@ -1176,6 +1435,8 @@ int main(void) {
 
         *timeOfNextRecording = 0;
 
+        *indexOfNextRecording = 0;
+
         *durationOfNextRecording = UINT32_MAX;
 
         *timeOfNextGPSTimeSetting = UINT32_MAX;
@@ -1203,6 +1464,18 @@ int main(void) {
         /* Initialise the power down interval flag */
 
         *poweredDownWithShortWaitInterval = false;
+
+        /* Initial GPS and sunrise and sunset variables */
+
+        *gpsLastFixLatitude = 0;
+
+        *gpsLastFixLongitude = 0;
+
+        *gpsLocationReceived = false;
+
+        *acousticLocationReceived = false;
+
+        *timeOfNextSunriseSunsetCalculation = 0;
 
         /* Copy default deployment ID */
 
@@ -1252,8 +1525,6 @@ int main(void) {
 
     bool fileSystemEnabled = false;
 
-    bool writtenConfigurationToFileInThisSession = false;
-
     if (switchPosition != *previousSwitchPosition) {
 
         /* Reset the GPS flag */
@@ -1266,7 +1537,7 @@ int main(void) {
 
         /* Check there are active recording periods if the switch is in CUSTOM position */
 
-        *readyToMakeRecordings = switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && configSettings->activeRecordingPeriods > 0);
+        *readyToMakeRecordings = switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && (configSettings->activeRecordingPeriods > 0 || configSettings->enableSunRecording));
 
         /* Check if acoustic configuration is required */
 
@@ -1276,11 +1547,11 @@ int main(void) {
 
             bool shouldPerformAcousticConfiguration = switchPosition == AM_SWITCH_CUSTOM && (AudioMoth_hasTimeBeenSet() == false || configSettings->requireAcousticConfiguration);
 
-            /* Overrule this decision if setting of time from GPS is enabled and acoustic configuration not enforced */
+            /* Overrule this decision if setting of time from GPS is enabled and acoustic configuration not enforced. Also set GPS time setting flag */
 
-            if (shouldPerformAcousticConfiguration && configSettings->enableTimeSettingFromGPS && configSettings->requireAcousticConfiguration == false) {
+            if (switchPosition == AM_SWITCH_CUSTOM && configSettings->enableTimeSettingFromGPS) {
 
-                shouldPerformAcousticConfiguration = false;
+                if (configSettings->requireAcousticConfiguration == false) shouldPerformAcousticConfiguration = false;
 
                 *shouldSetTimeFromGPS = true;
 
@@ -1288,7 +1559,7 @@ int main(void) {
 
             /* Determine whether to listen for the acoustic tone */
 
-            bool listenForAcousticTone = shouldPerformAcousticConfiguration == false && switchPosition == AM_SWITCH_CUSTOM;
+            bool listenForAcousticTone = switchPosition == AM_SWITCH_CUSTOM && shouldPerformAcousticConfiguration == false;
 
             if (listenForAcousticTone) {
 
@@ -1318,15 +1589,11 @@ int main(void) {
 
                 }
 
-                bool timedOut = AudioConfig_listenForAudioConfigurationPackets(listenForAcousticTone, AUDIO_CONFIG_PACKETS_TIMEOUT);
+                AudioConfig_listenForAudioConfigurationPackets(listenForAcousticTone, AUDIO_CONFIG_PACKETS_TIMEOUT);
 
                 AudioConfig_disableAudioConfiguration();
 
                 if (acousticConfigurationPerformed) {
-
-                    /* Cancel any previous requirement to use the GPS */
-
-                    *shouldSetTimeFromGPS = false;
 
                     /* Indicate success with LED flashes */
 
@@ -1342,21 +1609,23 @@ int main(void) {
 
                     AudioMoth_delay(500);
 
-                } else if (listenForAcousticTone && timedOut) {
-
-                    /* Turn off LED */
-
-                    AudioMoth_setBothLED(false);
-
                 } else {
 
-                    /* Not ready to make a recording unless GPS is to be used */
-
-                    *readyToMakeRecordings = *shouldSetTimeFromGPS;
-
                     /* Turn off LED */
 
                     AudioMoth_setBothLED(false);
+
+                    /* Determine if it is possible to still make a recording */
+
+                    if (configSettings->requireAcousticConfiguration) {
+
+                        *readyToMakeRecordings = false;
+
+                    } else {
+
+                        *readyToMakeRecordings = AudioMoth_hasTimeBeenSet() || *shouldSetTimeFromGPS;
+
+                    }
 
                     /* Power down */
 
@@ -1392,11 +1661,31 @@ int main(void) {
 
             *writtenConfigurationToFile = false;
 
-            /* Try to write configuration to file */
+            /* Reset GPS and sunrise and sunset variables */
 
-            fileSystemEnabled = AudioMoth_enableFileSystem(configSettings->sampleRateDivider == 1 ? AM_SD_CARD_HIGH_SPEED : AM_SD_CARD_NORMAL_SPEED);
+            *gpsLastFixLatitude = 0;
 
-            if (fileSystemEnabled) writtenConfigurationToFileInThisSession = writeConfigurationToFile(configSettings, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+            *gpsLastFixLongitude = 0;
+
+            *gpsLocationReceived = false;
+
+            *timeOfNextSunriseSunsetCalculation = 0;
+
+            /* Try to write configuration now if it will not be written later when time is set */
+
+            if (configSettings->enableSunRecording == false || *shouldSetTimeFromGPS == false) {
+
+                fileSystemEnabled = AudioMoth_enableFileSystem(configSettings->sampleRateDivider == 1 ? AM_SD_CARD_HIGH_SPEED : AM_SD_CARD_NORMAL_SPEED);
+
+                if (fileSystemEnabled) {
+                    
+                    AudioMoth_getTime(&currentTime, &currentMilliseconds);
+
+                    *writtenConfigurationToFile = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+                }
+
+            }
 
             /* Update the time and calculate earliest schedule start time */
 
@@ -1414,15 +1703,15 @@ int main(void) {
 
                     *timeOfNextRecording = UINT32_MAX;
 
+                    *indexOfNextRecording = 0; 
+
                     *durationOfNextRecording = UINT32_MAX;
 
                     *timeOfNextGPSTimeSetting = UINT32_MAX;
 
                 } else {
 
-                    scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
-
-                    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+                    determineSunriseAndSunsetTimesAndScheduleRecording(scheduleTime);
 
                 }
 
@@ -1433,6 +1722,8 @@ int main(void) {
             if (switchPosition == AM_SWITCH_DEFAULT) {
 
                 *timeOfNextRecording = scheduleTime;
+
+                *indexOfNextRecording = 0; 
 
                 *durationOfNextRecording = UINT32_MAX;
 
@@ -1492,7 +1783,7 @@ int main(void) {
 
     if (*shouldSetTimeFromGPS && *waitingForMagneticSwitch == false) {
 
-        /* Set the time from the GPS */
+        /* Enable the file system and set the time from the GPS */
 
         if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_NORMAL_SPEED);
             
@@ -1506,15 +1797,31 @@ int main(void) {
 
             *shouldSetTimeFromGPS = false;
 
+            /* Update the GPS location */
+
+            *gpsLocationReceived = true;
+
+            *gpsLatitude = *gpsLastFixLatitude;
+
+            *gpsLongitude = *gpsLastFixLongitude;
+
+            /* Write the configuration file */
+
+            if (configSettings->enableSunRecording && fileSystemEnabled) {
+
+                AudioMoth_getTime(&currentTime, &currentMilliseconds);
+                
+                *writtenConfigurationToFile = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+            }
+
             /* Schedule the next recording */
 
             AudioMoth_getTime(&currentTime, &currentMilliseconds);
 
             uint32_t scheduleTime = currentTime + ROUNDED_UP_DIV(currentMilliseconds + *recordingPreparationPeriod, MILLISECONDS_IN_SECOND);
 
-            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
-
-            *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+            determineSunriseAndSunsetTimesAndScheduleRecording(scheduleTime);
 
         }
         
@@ -1538,11 +1845,11 @@ int main(void) {
 
         /* Write configuration if not already done so */
 
-        if (writtenConfigurationToFileInThisSession == false && *writtenConfigurationToFile == false) {
+        if (*writtenConfigurationToFile == false) {
 
             if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(configSettings->sampleRateDivider == 1 ? AM_SD_CARD_HIGH_SPEED : AM_SD_CARD_NORMAL_SPEED);
 
-            if (fileSystemEnabled) *writtenConfigurationToFile = writeConfigurationToFile(configSettings, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+            if (fileSystemEnabled) *writtenConfigurationToFile = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
 
         }
 
@@ -1650,6 +1957,8 @@ int main(void) {
 
             *timeOfNextRecording = UINT32_MAX;
 
+            *indexOfNextRecording = 0; 
+
             *durationOfNextRecording = 0;
 
             *timeOfNextGPSTimeSetting = UINT32_MAX;
@@ -1666,15 +1975,15 @@ int main(void) {
 
             /* Calculate the next recording schedule */
 
-            scheduleRecording(scheduleTime, timeOfNextRecording, durationOfNextRecording, timeOfNextGPSTimeSetting, NULL);
-
-            *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? *timeOfNextGPSTimeSetting - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+            determineSunriseAndSunsetTimesAndScheduleRecording(scheduleTime);
 
         } else {
 
             /* Set parameters to start recording now */
 
             *timeOfNextRecording = scheduleTime;
+
+            *indexOfNextRecording = 0; 
 
             *durationOfNextRecording = UINT32_MAX;
 
@@ -1775,6 +2084,8 @@ int main(void) {
             if (*waitingForMagneticSwitch) {
 
                 stopWaitingForMagneticSwitch(&currentTime, &currentMilliseconds);
+
+                if (switchPosition == AM_SWITCH_CUSTOM && configSettings->enableTimeSettingFromGPS) *shouldSetTimeFromGPS = true;
 
             } else {
 
@@ -1922,6 +2233,22 @@ inline void GPS_handleGetTime(uint32_t *time, uint32_t *milliseconds) {
 
 }
 
+/* GPS format conversion */
+
+static int32_t convertToDecimalDegrees(uint32_t degrees, uint32_t minutes, uint32_t tenThousandths, char direction) {
+
+    int32_t value = degrees * GPS_LOCATION_PRECISION;
+
+    value += ROUNDED_DIV(minutes * GPS_LOCATION_PRECISION, MINUTES_IN_DEGREE);
+
+    value += ROUNDED_DIV(tenThousandths * (GPS_LOCATION_PRECISION / 10000), MINUTES_IN_DEGREE); 
+
+    if (direction == 'S' || direction == 'W') value *= -1;
+
+    return value;
+
+}
+
 /* GPS interrupt handlers */
 
 inline void GPS_handleTickEvent() {
@@ -1966,7 +2293,13 @@ inline void GPS_handleFixEvent(uint32_t time, uint32_t milliseconds, GPS_fixTime
 
     static char fixBuffer[128];
 
-    sprintf(fixBuffer, "Received GPS fix - %02d°%02d.%04d'%c %03d°%02d.%04d'%c at %02d/%02d/%04d %02d:%02d:%02d.%03d UTC.", fixPosition->latitudeDegrees, fixPosition->latitudeMinutes, fixPosition->latitudeTenThousandths, fixPosition->latitudeDirection, fixPosition->longitudeDegrees, fixPosition->longitudeMinutes, fixPosition->longitudeTenThousandths, fixPosition->longitudeDirection, fixTime->day, fixTime->month, fixTime->year, fixTime->hours, fixTime->minutes, fixTime->seconds, fixTime->milliseconds);
+    *gpsLastFixLatitude = convertToDecimalDegrees(fixPosition->latitudeDegrees, fixPosition->latitudeMinutes, fixPosition->latitudeTenThousandths, fixPosition->latitudeDirection);
+
+    *gpsLastFixLongitude = convertToDecimalDegrees(fixPosition->longitudeDegrees, fixPosition->longitudeMinutes, fixPosition->longitudeTenThousandths, fixPosition->longitudeDirection);
+
+    uint32_t length = sprintf(fixBuffer, "Received GPS fix - %ld.%06ld°%c %ld.%06ld°%c ", ABS(*gpsLastFixLatitude) / GPS_LOCATION_PRECISION, ABS(*gpsLastFixLatitude) % GPS_LOCATION_PRECISION, fixPosition->latitudeDirection, ABS(*gpsLastFixLongitude) / GPS_LOCATION_PRECISION, ABS(*gpsLastFixLongitude) % GPS_LOCATION_PRECISION, fixPosition->longitudeDirection);
+    
+    sprintf(fixBuffer + length, "(%02u°%02u.%04u'%c %03u°%02u.%04u'%c) at %02u/%02u/%04u %02u:%02u:%02u.%03u UTC.", fixPosition->latitudeDegrees, fixPosition->latitudeMinutes, fixPosition->latitudeTenThousandths, fixPosition->latitudeDirection, fixPosition->longitudeDegrees, fixPosition->longitudeMinutes, fixPosition->longitudeTenThousandths, fixPosition->longitudeDirection, fixTime->day, fixTime->month, fixTime->year, fixTime->hours, fixTime->minutes, fixTime->seconds, fixTime->milliseconds);
 
     writeGPSLogMessage(time, milliseconds, fixBuffer);
 
@@ -2190,11 +2523,15 @@ inline void AudioConfig_handleAudioConfigurationEvent(AC_audioConfigurationEvent
 
 inline void AudioConfig_handleAudioConfigurationPacket(uint8_t *receiveBuffer, uint32_t size) {
 
-    bool isTimePacket = size == (UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES);
+    uint32_t standardPacketSize = UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES;
 
-    bool isDeploymentPacket = size == (UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES + DEPLOYMENT_ID_LENGTH);
+    bool standardPacket = size == standardPacketSize;
 
-    if (isTimePacket || isDeploymentPacket) {
+    bool hasLocation = size == (standardPacketSize + ACOUSTIC_LOCATION_SIZE_IN_BYTES) || size == (standardPacketSize + DEPLOYMENT_ID_LENGTH + ACOUSTIC_LOCATION_SIZE_IN_BYTES);
+
+    bool hasDeploymentID = size == (standardPacketSize + DEPLOYMENT_ID_LENGTH) || size == (standardPacketSize + DEPLOYMENT_ID_LENGTH + ACOUSTIC_LOCATION_SIZE_IN_BYTES);
+
+    if (standardPacket || hasLocation || hasDeploymentID) {
 
         /* Copy time from the packet */
 
@@ -2216,11 +2553,27 @@ inline void AudioConfig_handleAudioConfigurationPacket(uint8_t *receiveBuffer, u
 
         AudioMoth_setTime(time + millisecondTimeOffset / MILLISECONDS_IN_SECOND, millisecondTimeOffset % MILLISECONDS_IN_SECOND);
 
-        /* Set deployment */
+        /* Set acoustic location */
 
-        if (isDeploymentPacket) {
+        if (hasLocation) {
 
-            copyToBackupDomain((uint32_t*)deploymentID, receiveBuffer + UINT32_SIZE_IN_BYTES + UINT16_SIZE_IN_BYTES, DEPLOYMENT_ID_LENGTH);
+            acousticLocation_t location;
+
+            memcpy(&location, receiveBuffer + standardPacketSize, ACOUSTIC_LOCATION_SIZE_IN_BYTES);
+
+            *acousticLocationReceived = true;
+
+            *acousticLatitude = location.latitude;
+            
+            *acousticLongitude = location.longitude * ACOUSTIC_LONGITUDE_MULTIPLIER;
+
+        }
+
+        /* Set deployment ID */
+
+        if (hasDeploymentID) {
+
+            copyToBackupDomain((uint32_t*)deploymentID, receiveBuffer + standardPacketSize + (hasLocation ? ACOUSTIC_LOCATION_SIZE_IN_BYTES : 0), DEPLOYMENT_ID_LENGTH);
 
         }
 
@@ -2631,11 +2984,27 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
                                          fileSizeLimited ? FILE_SIZE_LIMITED :
                                          RECORDING_OKAY;
 
+    /* Generate the new file name if necessary */
+    
+    static char newFilename[MAXIMUM_FILE_NAME_LENGTH];
+
+    if (timeOffset > 0) {
+
+        generateFolderAndFilename(foldername, newFilename, timeOfNextRecording + timeOffset, configSettings->enableDailyFolders, frequencyTriggerEnabled || amplitudeThresholdEnabled);
+
+    }
+
+    /* Write the GUANO data */
+
+    uint32_t guanoDataSize = writeGuanoData((char*)compressionBuffer, configSettings, timeOfNextRecording + timeOffset, gpsLocationReceived, gpsLastFixLatitude, gpsLastFixLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID, timeOffset > 0 ? newFilename : filename, extendedBatteryState, temperature);
+
+    FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(compressionBuffer, guanoDataSize));
+
     /* Initialise the WAV header */
 
     samplesWritten = MAX(numberOfSamplesInHeader, samplesWritten);
 
-    setHeaderDetails(&wavHeader, effectiveSampleRate, samplesWritten - numberOfSamplesInHeader - totalNumberOfCompressedSamples);
+    setHeaderDetails(&wavHeader, effectiveSampleRate, samplesWritten - numberOfSamplesInHeader - totalNumberOfCompressedSamples, guanoDataSize);
 
     setHeaderComment(&wavHeader, configSettings, timeOfNextRecording + timeOffset, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID, extendedBatteryState, temperature, externalMicrophone, recordingState, requestedFilterType);
 
@@ -2655,11 +3024,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     /* Rename the file if necessary */
 
-    static char newFilename[MAXIMUM_FILE_NAME_LENGTH];
-
     if (timeOffset > 0) {
-
-        generateFolderAndFilename(foldername, newFilename, timeOfNextRecording + timeOffset, configSettings->enableDailyFolders, frequencyTriggerEnabled || amplitudeThresholdEnabled);
 
         if (enableLED) AudioMoth_setRedLED(true);
 
@@ -2672,6 +3037,372 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
     /* Return recording state */
 
     return recordingState;
+
+}
+
+/* Determine sunrise and sunset and schedule recording */
+
+static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentTime) {
+
+    uint32_t scheduleTime = currentTime;
+
+    /* Calculate initial sunrise and sunset time if appropriate */
+
+    uint32_t startOfRecordingPeriod;
+
+    if (configSettings->enableSunRecording && *timeOfNextSunriseSunsetCalculation == 0) {
+
+        determineSunriseAndSunsetTimes(scheduleTime);
+
+        determineTimeOfNextSunriseSunsetCalculation(scheduleTime, timeOfNextSunriseSunsetCalculation);
+
+        determineSunriseAndSunsetTimes(*timeOfNextSunriseSunsetCalculation - SECONDS_IN_DAY);
+
+        determineTimeOfNextSunriseSunsetCalculation(scheduleTime, timeOfNextSunriseSunsetCalculation);
+
+        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, &startOfRecordingPeriod, NULL);
+
+        if (*timeOfNextSunriseSunsetCalculation < *timeOfNextRecording) *timeOfNextSunriseSunsetCalculation += SECONDS_IN_DAY;
+    
+    } else {
+
+        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, &startOfRecordingPeriod, NULL);
+  
+    }
+
+    /* Check if sunrise and sunset should be recalculated */
+
+    if (configSettings->enableSunRecording && *timeOfNextRecording >= *timeOfNextSunriseSunsetCalculation) {
+        
+        scheduleTime = MAX(scheduleTime, *timeOfNextSunriseSunsetCalculation);
+
+        determineSunriseAndSunsetTimes(scheduleTime);
+
+        determineTimeOfNextSunriseSunsetCalculation(scheduleTime, timeOfNextSunriseSunsetCalculation);
+
+        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, &startOfRecordingPeriod, NULL);
+
+        if (*timeOfNextSunriseSunsetCalculation < *timeOfNextRecording) *timeOfNextSunriseSunsetCalculation += SECONDS_IN_DAY;
+
+    }
+
+    /* Update GPS time setting time */
+
+    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? startOfRecordingPeriod - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+
+}
+
+/* Determine sunrise and sunset calculation time */
+
+static void determineTimeOfNextSunriseSunsetCalculation(uint32_t currentTime, uint32_t *timeOfNextSunriseSunsetCalculation) {
+
+    /* Check if limited by earliest recording time */
+
+    if (configSettings->earliestRecordingTime > 0) currentTime = MAX(currentTime, configSettings->earliestRecordingTime);
+
+    /* Determine when the middle of largest gap between recording periods occurs */
+
+    uint32_t startOfGapMinutes, endOfGapMinutes;
+
+    if (*numberOfSunRecordingPeriods == 1) {
+
+        startOfGapMinutes = firstSunRecordingPeriod->endMinutes;
+
+        endOfGapMinutes = firstSunRecordingPeriod->startMinutes;
+
+    } else {
+
+        uint32_t gapFromFirstPeriodToSecondPeriod = secondSunRecordingPeriod->startMinutes - firstSunRecordingPeriod->endMinutes;
+
+        uint32_t gapFromSecondPeriodsToFirstPeriod = secondSunRecordingPeriod->endMinutes < secondSunRecordingPeriod->startMinutes ? firstSunRecordingPeriod->startMinutes - secondSunRecordingPeriod->endMinutes : MINUTES_IN_DAY - secondSunRecordingPeriod->endMinutes + firstSunRecordingPeriod->startMinutes;
+
+        if (gapFromFirstPeriodToSecondPeriod > gapFromSecondPeriodsToFirstPeriod) {
+
+            startOfGapMinutes = firstSunRecordingPeriod->endMinutes;
+
+            endOfGapMinutes = secondSunRecordingPeriod->startMinutes;
+
+        } else {
+
+            startOfGapMinutes = secondSunRecordingPeriod->endMinutes;
+
+            endOfGapMinutes = firstSunRecordingPeriod->startMinutes;
+
+        }
+
+    }
+
+    uint32_t calculationMinutes = endOfGapMinutes + startOfGapMinutes;
+
+    if (endOfGapMinutes < startOfGapMinutes) calculationMinutes += MINUTES_IN_DAY;
+
+    calculationMinutes /= 2;
+
+    calculationMinutes = calculationMinutes % MINUTES_IN_DAY;
+
+    /* Determine the number of seconds of this day */
+
+    time_t rawTime = currentTime;
+
+    struct tm *time = gmtime(&rawTime);
+
+    uint32_t currentSeconds = SECONDS_IN_HOUR * time->tm_hour + SECONDS_IN_MINUTE * time->tm_min + time->tm_sec;
+
+    /* Determine the time of the next sunrise and sunset calculation */
+
+    uint32_t calculationTime = currentTime - currentSeconds + SECONDS_IN_MINUTE * calculationMinutes;
+
+    if (calculationTime <= currentTime) calculationTime += SECONDS_IN_DAY;
+
+    *timeOfNextSunriseSunsetCalculation = calculationTime;
+
+}
+
+/* Determine sunrise and sunset times */
+
+static void determineSunriseAndSunsetTimes(uint32_t currentTime) {
+
+    /* Calculate future sunrise and sunset time if recording is limited by earliest recording time */
+
+    if (configSettings->earliestRecordingTime > 0) currentTime = MAX(currentTime, configSettings->earliestRecordingTime);
+
+    /* Determine sunrise and sunset times */
+    
+    SR_trend_t trend;
+
+    SR_solution_t solution;
+
+    uint32_t sunriseMinutes, sunsetMinutes;
+
+    float latitude = *gpsLocationReceived ? (float)*gpsLatitude / (float)GPS_LOCATION_PRECISION : *acousticLocationReceived ? (float)*acousticLatitude / (float)ACOUSTIC_LOCATION_PRECISION : (float)configSettings->latitude / (float)CONFIG_LOCATION_PRECISION;
+
+    float longitude = *gpsLocationReceived ? (float)*gpsLongitude / (float)GPS_LOCATION_PRECISION : *acousticLocationReceived ? (float)*acousticLongitude / (float)ACOUSTIC_LOCATION_PRECISION : (float)configSettings->longitude / (float)CONFIG_LOCATION_PRECISION;
+
+    Sunrise_calculateFromUnix(configSettings->sunRecordingEvent, currentTime, latitude, longitude, &solution, &trend, &sunriseMinutes, &sunsetMinutes);
+
+    /* Calculate maximum recording duration */
+
+    uint32_t minimumRecordingGap = MAX(MINIMUM_SUN_RECORDING_GAP, SUN_RECORDING_GAP_MULTIPLIER * configSettings->sunRoundingMinutes);
+
+    uint32_t maximumRecordingDuration = MINUTES_IN_DAY - minimumRecordingGap;
+
+    /* Round the sunrise and sunset times */
+
+    uint32_t roundedSunriseMinutes = configSettings->sunRoundingMinutes > 0 ? UNSIGNED_ROUND(sunriseMinutes, configSettings->sunRoundingMinutes) : sunriseMinutes;
+
+    uint32_t roundedSunsetMinutes = configSettings->sunRoundingMinutes > 0 ? UNSIGNED_ROUND(sunsetMinutes, configSettings->sunRoundingMinutes) : sunsetMinutes;
+
+    /* Calculate start and end of potential recording periods */
+
+    uint32_t beforeSunrise = (MINUTES_IN_DAY + roundedSunriseMinutes - configSettings->beforeSunriseMinutes) % MINUTES_IN_DAY;
+
+    uint32_t afterSunrise = (MINUTES_IN_DAY + roundedSunriseMinutes + configSettings->afterSunriseMinutes) % MINUTES_IN_DAY;
+
+    uint32_t beforeSunset = (MINUTES_IN_DAY + roundedSunsetMinutes - configSettings->beforeSunsetMinutes) % MINUTES_IN_DAY;
+
+    uint32_t afterSunset = (MINUTES_IN_DAY + roundedSunsetMinutes + configSettings->afterSunsetMinutes) % MINUTES_IN_DAY;
+
+    /* Determine schedule */
+
+    recordingPeriod_t tempRecordingPeriod;
+    
+    if (configSettings->sunRecordingMode == SUNRISE_RECORDING) {
+
+        /* Recording from before sunrise to after sunrise */
+
+        *numberOfSunRecordingPeriods = 1;
+
+        tempRecordingPeriod.startMinutes = beforeSunrise;
+            
+        tempRecordingPeriod.endMinutes = afterSunrise;
+            
+        copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+    } else if (configSettings->sunRecordingMode == SUNSET_RECORDING) {
+
+        /* Recording from before sunset to after sunset */
+
+        *numberOfSunRecordingPeriods = 1;
+
+        tempRecordingPeriod.startMinutes = beforeSunset;
+            
+        tempRecordingPeriod.endMinutes = afterSunset;
+
+        copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+    } else if (configSettings->sunRecordingMode == SUNRISE_AND_SUNSET_RECORDING) {
+
+        /* Order the recording periods */
+
+        uint32_t firstPeriodStartMinutes = beforeSunrise < beforeSunset ? beforeSunrise : beforeSunset;
+        
+        uint32_t firstPeriodEndMinutes = beforeSunrise < beforeSunset ? afterSunrise : afterSunset;
+       
+        uint32_t secondPeriodStartMinutes = beforeSunrise < beforeSunset ? beforeSunset : beforeSunrise;
+        
+        uint32_t secondPeriodEndMinutes  = beforeSunrise < beforeSunset ? afterSunset : afterSunrise;
+
+        /* Determine whether the recording periods wrap */
+
+        bool firstPeriodWraps = firstPeriodEndMinutes <= firstPeriodStartMinutes;
+
+        bool secondPeriodWraps = secondPeriodEndMinutes <= secondPeriodStartMinutes;
+
+        /* Combine recording periods together if they overlap */
+
+        if (firstPeriodWraps) {
+
+            *numberOfSunRecordingPeriods = 1;
+
+            tempRecordingPeriod.startMinutes = firstPeriodStartMinutes;
+
+            tempRecordingPeriod.endMinutes = secondPeriodWraps ? MIN(firstPeriodStartMinutes, MAX(firstPeriodEndMinutes, secondPeriodEndMinutes)) : firstPeriodEndMinutes;
+
+            copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+        } else if (secondPeriodStartMinutes <= firstPeriodEndMinutes) {
+
+            *numberOfSunRecordingPeriods = 1;
+
+            tempRecordingPeriod.startMinutes = firstPeriodStartMinutes;
+
+            tempRecordingPeriod.endMinutes = secondPeriodWraps ? MIN(firstPeriodStartMinutes, secondPeriodEndMinutes) : MAX(firstPeriodEndMinutes, secondPeriodEndMinutes);
+
+            copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+        } else if (secondPeriodWraps && secondPeriodEndMinutes >= firstPeriodStartMinutes) {
+
+            *numberOfSunRecordingPeriods = 1;
+
+            tempRecordingPeriod.startMinutes = secondPeriodStartMinutes;
+
+            tempRecordingPeriod.endMinutes = MAX(firstPeriodEndMinutes, secondPeriodEndMinutes);
+
+            copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+        } else {
+
+            *numberOfSunRecordingPeriods = 2;
+
+            tempRecordingPeriod.startMinutes = firstPeriodStartMinutes;
+
+            tempRecordingPeriod.endMinutes = firstPeriodEndMinutes;
+
+            copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+            tempRecordingPeriod.startMinutes = secondPeriodStartMinutes;
+
+            tempRecordingPeriod.endMinutes = secondPeriodEndMinutes;
+
+            copyToBackupDomain((uint32_t*)secondSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+        }
+
+        /* Adjust the size of the minimum gap between recording periods if it is less than the threshold  */
+
+        if (*numberOfSunRecordingPeriods == 1) {
+
+            uint32_t duration = firstSunRecordingPeriod->endMinutes <= firstSunRecordingPeriod->startMinutes ? MINUTES_IN_DAY + firstSunRecordingPeriod->endMinutes - firstSunRecordingPeriod->startMinutes : firstSunRecordingPeriod->endMinutes - firstSunRecordingPeriod->startMinutes;
+
+            if (duration > maximumRecordingDuration) {
+
+                tempRecordingPeriod.startMinutes = firstSunRecordingPeriod->startMinutes;
+
+                tempRecordingPeriod.endMinutes = (firstSunRecordingPeriod->startMinutes + maximumRecordingDuration) % MINUTES_IN_DAY;
+
+                copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+            }
+
+        }
+        
+        if (*numberOfSunRecordingPeriods == 2) {
+
+            uint32_t gapFromFirstPeriodToSecondPeriod = secondSunRecordingPeriod->startMinutes - firstSunRecordingPeriod->endMinutes;
+
+            uint32_t gapFromSecondPeriodsToFirstPeriod = secondSunRecordingPeriod->endMinutes < secondSunRecordingPeriod->startMinutes ? firstSunRecordingPeriod->startMinutes - secondSunRecordingPeriod->endMinutes : MINUTES_IN_DAY + firstSunRecordingPeriod->startMinutes - secondSunRecordingPeriod->endMinutes;
+
+            if (gapFromFirstPeriodToSecondPeriod >= gapFromSecondPeriodsToFirstPeriod && gapFromFirstPeriodToSecondPeriod < minimumRecordingGap) {
+
+                tempRecordingPeriod.startMinutes = firstSunRecordingPeriod->startMinutes;
+
+                tempRecordingPeriod.endMinutes = (MINUTES_IN_DAY + firstSunRecordingPeriod->endMinutes - minimumRecordingGap + gapFromFirstPeriodToSecondPeriod) % MINUTES_IN_DAY;
+
+                copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+            } else if (gapFromSecondPeriodsToFirstPeriod >= gapFromFirstPeriodToSecondPeriod && gapFromSecondPeriodsToFirstPeriod < minimumRecordingGap) {
+
+                tempRecordingPeriod.startMinutes = secondSunRecordingPeriod->startMinutes;
+
+                tempRecordingPeriod.endMinutes = (MINUTES_IN_DAY + secondSunRecordingPeriod->endMinutes - minimumRecordingGap + gapFromSecondPeriodsToFirstPeriod) % MINUTES_IN_DAY;
+
+                copyToBackupDomain((uint32_t*)secondSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+            }
+
+        }
+
+    } else if (configSettings->sunRecordingMode == SUNSET_TO_SUNRISE_RECORDING) {
+
+        /* Recording from before sunset to after sunrise */
+
+        *numberOfSunRecordingPeriods = 1;
+
+        tempRecordingPeriod.startMinutes = beforeSunset;
+
+        uint32_t timeFromSunsetToSunrise;
+
+        if (roundedSunriseMinutes == roundedSunsetMinutes) {
+
+            timeFromSunsetToSunrise = trend == SR_DAY_SHORTER_THAN_NIGHT ? MINUTES_IN_DAY : 0;
+
+        } else {
+
+            timeFromSunsetToSunrise = roundedSunriseMinutes < roundedSunsetMinutes ? MINUTES_IN_DAY + roundedSunriseMinutes - roundedSunsetMinutes : roundedSunriseMinutes - roundedSunsetMinutes;
+        
+        }
+        
+        uint32_t duration = timeFromSunsetToSunrise + configSettings->beforeSunsetMinutes + configSettings->afterSunriseMinutes;
+
+        if (duration == 0) duration = 1;
+
+        if (duration > maximumRecordingDuration) duration = maximumRecordingDuration;
+
+        tempRecordingPeriod.endMinutes = (beforeSunset + duration) % MINUTES_IN_DAY;
+
+        copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+    } else if (configSettings->sunRecordingMode == SUNRISE_TO_SUNSET_RECORDING) {
+
+        /* Recording from before sunrise to after sunset */
+
+        *numberOfSunRecordingPeriods = 1;
+
+        tempRecordingPeriod.startMinutes = beforeSunrise;
+
+        uint32_t timeFromSunriseToSunset;
+
+        if (roundedSunriseMinutes == roundedSunsetMinutes) {
+
+            timeFromSunriseToSunset = trend == SR_DAY_LONGER_THAN_NIGHT ? MINUTES_IN_DAY : 0;
+
+        } else {
+
+            timeFromSunriseToSunset = roundedSunsetMinutes < roundedSunriseMinutes ? MINUTES_IN_DAY + roundedSunsetMinutes - roundedSunriseMinutes : roundedSunsetMinutes - roundedSunriseMinutes;
+
+        }
+
+        uint32_t duration = timeFromSunriseToSunset + configSettings->beforeSunriseMinutes + configSettings->afterSunsetMinutes;
+
+        if (duration == 0) duration = 1;
+
+        if (duration > maximumRecordingDuration) duration = maximumRecordingDuration;
+
+        tempRecordingPeriod.endMinutes = (beforeSunrise + duration) % MINUTES_IN_DAY;
+        
+        copyToBackupDomain((uint32_t*)firstSunRecordingPeriod, (uint8_t*)&tempRecordingPeriod, sizeof(recordingPeriod_t));
+
+    }
 
 }
 
@@ -2707,7 +3438,7 @@ static void calculateStartAndDuration(uint32_t currentTime, uint32_t currentSeco
 
 }
 
-static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *startOfRecordingPeriod, uint32_t *endOfRecordingPeriod) {
+static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecording, uint32_t *indexOfNextRecording, uint32_t *durationOfNextRecording, uint32_t *startOfRecordingPeriod, uint32_t *endOfRecordingPeriod) {
 
     /* Enforce minumum schedule date */
     
@@ -2721,13 +3452,19 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     }
 
-    /* No suitable recording periods */
+    /* Select appropriate recording periods */
 
-    uint32_t activeRecordingPeriods = MIN(configSettings->activeRecordingPeriods, MAX_RECORDING_PERIODS);
+    uint32_t activeRecordingPeriods = configSettings->enableSunRecording ? *numberOfSunRecordingPeriods : MIN(configSettings->activeRecordingPeriods, MAX_RECORDING_PERIODS);
+
+    recordingPeriod_t *recordingPeriods = configSettings->enableSunRecording ? firstSunRecordingPeriod : configSettings->recordingPeriods;
+
+    /* No suitable recording periods */
 
     if (activeRecordingPeriods == 0) {
 
         *timeOfNextRecording = UINT32_MAX;
+
+        *indexOfNextRecording = 0;
 
         if (startOfRecordingPeriod) *startOfRecordingPeriod = UINT32_MAX;
 
@@ -2749,9 +3486,11 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     /* Check the last active period on the previous day */
 
-    recordingPeriod_t *lastPeriod = configSettings->recordingPeriods + configSettings->activeRecordingPeriods - 1;
-
     uint32_t startTime, duration;
+
+    uint32_t index = activeRecordingPeriods - 1;
+
+    recordingPeriod_t *lastPeriod = recordingPeriods + activeRecordingPeriods - 1;
     
     calculateStartAndDuration(currentTime - SECONDS_IN_DAY, currentSeconds, lastPeriod, &startTime, &duration);
 
@@ -2765,9 +3504,9 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     /* Check each active recording period on the same day*/
 
-    for (uint32_t i = 0; i < activeRecordingPeriods; i += 1) {
+    for (index = 0; index < activeRecordingPeriods; index += 1) {
 
-        recordingPeriod_t *currentPeriod = configSettings->recordingPeriods + i;
+        recordingPeriod_t *currentPeriod = recordingPeriods + index;
 
         calculateStartAndDuration(currentTime, currentSeconds, currentPeriod, &startTime, &duration);
 
@@ -2783,7 +3522,9 @@ static void scheduleRecording(uint32_t currentTime, uint32_t *timeOfNextRecordin
 
     /* Calculate time until first period tomorrow */
 
-    recordingPeriod_t *firstPeriod = configSettings->recordingPeriods;
+    index = 0;
+
+    recordingPeriod_t *firstPeriod = recordingPeriods;
 
     calculateStartAndDuration(currentTime + SECONDS_IN_DAY, currentSeconds, firstPeriod, &startTime, &duration);
 
@@ -2884,6 +3625,10 @@ done:
         }
 
     }
+
+    /* Set the index of the next recording */
+
+    *indexOfNextRecording = index;
 
 }
 
