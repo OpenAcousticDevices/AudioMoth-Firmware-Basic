@@ -59,6 +59,8 @@
 #define SHORT_WAIT_INTERVAL                     100
 #define DEFAULT_WAIT_INTERVAL                   1000
 
+#define USB_CONFIGURATION_BLINK                 400
+
 /* SRAM buffer constants */
 
 #define NUMBER_OF_BUFFERS                       8
@@ -570,11 +572,11 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
     }
 
-    char *sign = temperature < 0 ? "-" : "";
+    char *temperatureSign = temperature < 0 ? "-" : "";
 
     uint32_t temperatureInDecidegrees = ROUNDED_DIV(ABS(temperature), 100);
 
-    comment += sprintf(comment, " and temperature was %s%lu.%luC.", sign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
+    comment += sprintf(comment, " and temperature was %s%lu.%luC.", temperatureSign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
     
     bool frequencyTriggerEnabled = configSettings->enableFrequencyTrigger;
 
@@ -708,17 +710,21 @@ static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, u
 
         int32_t longitude = *gpsLocationReceived ? *gpsLastFixLongitude : *acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
 
+        char *latitudeSign = latitude < 0 ? "-" : "";
+
+        char *longitudeSign = longitude < 0 ? "-" : "";
+
         if (*gpsLocationReceived) {
 
-            length += sprintf(buffer + length, "Loc Position:%ld.%06ld %ld.%06ld\nOAD|Loc Source:GPS\n", latitude / GPS_LOCATION_PRECISION, ABS(latitude) % GPS_LOCATION_PRECISION, longitude / GPS_LOCATION_PRECISION, ABS(longitude) % GPS_LOCATION_PRECISION);
+            length += sprintf(buffer + length, "Loc Position:%s%ld.%06ld %s%ld.%06ld\nOAD|Loc Source:GPS\n", latitudeSign, ABS(latitude) / GPS_LOCATION_PRECISION, ABS(latitude) % GPS_LOCATION_PRECISION, longitudeSign, ABS(longitude) / GPS_LOCATION_PRECISION, ABS(longitude) % GPS_LOCATION_PRECISION);
 
         } else if (*acousticLocationReceived) {
 
-            length += sprintf(buffer + length, "Loc Position:%ld.%06ld %ld.%06ld\nOAD|Loc Source:Acoustic chime\n", latitude / ACOUSTIC_LOCATION_PRECISION, ABS(latitude) % ACOUSTIC_LOCATION_PRECISION, longitude / ACOUSTIC_LOCATION_PRECISION, ABS(longitude) % ACOUSTIC_LOCATION_PRECISION);
+            length += sprintf(buffer + length, "Loc Position:%s%ld.%06ld %s%ld.%06ld\nOAD|Loc Source:Acoustic chime\n", latitudeSign, ABS(latitude) / ACOUSTIC_LOCATION_PRECISION, ABS(latitude) % ACOUSTIC_LOCATION_PRECISION, longitudeSign, ABS(longitude) / ACOUSTIC_LOCATION_PRECISION, ABS(longitude) % ACOUSTIC_LOCATION_PRECISION);
 
         } else {
 
-            length += sprintf(buffer + length, "Loc Position:%ld.%02ld %ld.%02ld\nOAD|Loc Source:Configuration app\n", latitude / CONFIG_LOCATION_PRECISION, ABS(latitude) % CONFIG_LOCATION_PRECISION, longitude / CONFIG_LOCATION_PRECISION, ABS(longitude) % CONFIG_LOCATION_PRECISION);
+            length += sprintf(buffer + length, "Loc Position:%s%ld.%02ld %s%ld.%02ld\nOAD|Loc Source:Configuration app\n", latitudeSign, ABS(latitude) / CONFIG_LOCATION_PRECISION, ABS(latitude) % CONFIG_LOCATION_PRECISION, longitudeSign, ABS(longitude) / CONFIG_LOCATION_PRECISION, ABS(longitude) % CONFIG_LOCATION_PRECISION);
 
         }
 
@@ -732,11 +738,11 @@ static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, u
 
     length += sprintf(buffer + length, "OAD|Battery Voltage:%01lu.%01lu\n", batteryVoltage / 10, batteryVoltage % 10);
     
-    char *sign = temperature < 0 ? "-" : "";
+    char *temperatureSign = temperature < 0 ? "-" : "";
 
     uint32_t temperatureInDecidegrees = ROUNDED_DIV(ABS(temperature), 100);
 
-    length += sprintf(buffer + length, "Temperature Int:%s%lu.%lu", sign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
+    length += sprintf(buffer + length, "Temperature Int:%s%lu.%lu", temperatureSign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
     
     *(uint32_t*)(buffer + RIFF_ID_LENGTH) = length - sizeof(chunk_t);;
 
@@ -1243,7 +1249,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 10, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 10, 1};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -2480,6 +2486,10 @@ inline void AudioMoth_usbApplicationPacketReceived(uint32_t messageType, uint8_t
         /* Set the time */
 
         AudioMoth_setTime(configSettings->time, USB_CONFIG_TIME_CORRECTION);
+
+        /* Blink the green LED */
+
+        AudioMoth_blinkDuringUSB(USB_CONFIGURATION_BLINK);
 
     } else {
 
