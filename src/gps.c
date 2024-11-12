@@ -32,8 +32,8 @@
 
 /* GPS fix constants */
 
-#define MINIMUM_VALID_PPS_TO_SET_TIME           4
-#define MINIMUM_VALID_RMC_TO_SET_TIME           4
+#define MINIMUM_VALID_PPS_TO_SET_TIME           8
+#define MINIMUM_VALID_RMC_TO_SET_TIME           8
 
 /* Useful time constants */
 

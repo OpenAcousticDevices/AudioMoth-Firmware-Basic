@@ -26,8 +26,8 @@
 
 #define PULSE_INTERVAL                      4096
 
-#define MAXIMUM_NUMBER_OF_BYTES             16
-#define RECEIVE_BUFFER_SIZE_IN_BYTES        16
+#define MAXIMUM_NUMBER_OF_BYTES             23
+#define RECEIVE_BUFFER_SIZE_IN_BYTES        23
 
 #define CRC_POLY                            0x1021
 #define CRC_SIZE_IN_BYTES                   2

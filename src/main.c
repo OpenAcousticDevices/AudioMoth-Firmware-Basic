@@ -78,9 +78,9 @@
 
 /* File size constants */
 
-#define MAXIMUM_FILE_NAME_LENGTH                32
+#define MAXIMUM_FILE_NAME_LENGTH                64
 
-#define MAXIMUM_WAV_FILE_SIZE                   UINT32_MAX
+#define MAXIMUM_WAV_FILE_SIZE                   (UINT32_MAX - 1024 * 1024)
 
 /* Configuration file constants */
 
@@ -133,8 +133,10 @@
 /* GPS time setting constants */
 
 #define GPS_MAXIMUM_MS_DIFFERENCE               (SECONDS_IN_HOUR * MILLISECONDS_IN_SECOND)
-#define GPS_MAX_TIME_SETTING_PERIOD             300
+#define GPS_INITIAL_TIME_SETTING_PERIOD         300
+#define GPS_DEFAULT_TIME_SETTING_PERIOD         300
 #define GPS_MIN_TIME_SETTING_PERIOD             30
+#define GPS_TIME_SETTING_MARGIN                 2
 #define GPS_FREQUENCY_PRECISION                 1000
 #define GPS_FILENAME                            "GPS.TXT"
 
@@ -249,6 +251,10 @@ typedef enum {BATTERY_LEVEL, NIMH_LIPO_BATTERY_VOLTAGE} AM_batteryLevelDisplayTy
 
 typedef enum {SUNRISE_RECORDING, SUNSET_RECORDING, SUNRISE_AND_SUNSET_RECORDING, SUNSET_TO_SUNRISE_RECORDING, SUNRISE_TO_SUNSET_RECORDING} AM_sunRecordingMode_t;
 
+/* Sun recording mode enumeration */
+
+typedef enum {INITIAL_GPS_FIX, GPS_FIX_BEFORE_RECORDING_PERIOD, GPS_FIX_BETWEEN_RECORDING_PERIODS, GPS_FIX_AFTER_RECORDING_PERIOD, GPS_FIX_BEFORE_INDIVIDUAL_RECORDING, GPS_FIX_BETWEEN_INDIVIDUAL_RECORDINGS, GPS_FIX_AFTER_INDIVIDUAL_RECORDING} AM_gpsFixMode_t;
+
 /* WAV header */
 
 #pragma pack(push, 1)
@@ -338,14 +344,16 @@ typedef struct {
             uint16_t afterSunriseMinutes : 10;
             uint16_t beforeSunsetMinutes : 10;
             uint16_t afterSunsetMinutes : 10;
-            
         };
     };
     int8_t timezoneHours;
     uint8_t enableLowVoltageCutoff;
     uint8_t disableBatteryLevelDisplay;
     int8_t timezoneMinutes;
-    uint8_t disableSleepRecordCycle;
+    uint8_t disableSleepRecordCycle : 1;
+    uint8_t enableFilenameWithDeviceID : 1;
+    uint8_t enableTimeSettingBeforeAndAfterRecordings: 1;
+    uint8_t gpsTimeSettingPeriod: 4;
     uint32_t earliestRecordingTime;
     uint32_t latestRecordingTime;
     uint16_t lowerFilterFreq;
@@ -407,6 +415,9 @@ static const configSettings_t defaultConfigSettings = {
     .disableBatteryLevelDisplay = 0,
     .timezoneMinutes = 0,
     .disableSleepRecordCycle = 0,
+    .enableFilenameWithDeviceID = 0,
+    .enableTimeSettingBeforeAndAfterRecordings = 0,
+    .gpsTimeSettingPeriod = 0,
     .earliestRecordingTime = 0,
     .latestRecordingTime = 0,
     .lowerFilterFreq = 0,
@@ -453,15 +464,21 @@ typedef struct {
 
 #pragma pack(pop)
 
+/* Function to select energy saver mode */
+
+static bool isEnergySaverMode(configSettings_t *configSettings) {
+
+    return configSettings->enableEnergySaverMode && configSettings->sampleRate / configSettings->sampleRateDivider <= ENERGY_SAVER_SAMPLE_RATE_THRESHOLD;
+
+}
+
 /* Functions to format header and configuration components */
 
-static uint32_t formatDecibels(char *dest, uint32_t value) {
+static uint32_t formatDecibels(char *dest, uint32_t value, bool space) {
 
-    if (value) return sprintf(dest, "-%lu dB", value);
+    if (value > 0) return sprintf(dest, space ? "-%lu dB" : "-%ludB", value);
 
-    memcpy(dest, "0 dB", 4);
-
-    return 4;
+    return sprintf(dest, space ? "0 dB" : "0dB");
 
 }
 
@@ -506,9 +523,13 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
     sprintf(artist, "AudioMoth " SERIAL_NUMBER, FORMAT_SERIAL_NUMBER(serialNumber));
 
-    /* Format comment field */
+    /* Clear comment field */
 
     char *comment = wavHeader->icmt.comment;
+
+    memset(comment, 0, LENGTH_OF_COMMENT);
+
+    /* Format comment field */
 
     comment += sprintf(comment, "Recorded at %02d:%02d:%02d %02d/%02d/%04d (UTC", time.tm_hour, time.tm_min, time.tm_sec, time.tm_mday, MONTH_OFFSET + time.tm_mon, YEAR_OFFSET + time.tm_year);
 
@@ -616,7 +637,7 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
         if (configSettings->enableAmplitudeThresholdDecibelScale && configSettings->enableAmplitudeThresholdPercentageScale == false) {
 
-            comment += formatDecibels(comment, configSettings->amplitudeThresholdDecibels);
+            comment += formatDecibels(comment, configSettings->amplitudeThresholdDecibels, true);
 
         } else if (configSettings->enableAmplitudeThresholdPercentageScale && configSettings->enableAmplitudeThresholdDecibelScale == false) {
 
@@ -656,6 +677,10 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
             comment += sprintf(comment, " due to file size limit.");
 
+        } else if (recordingState == SDCARD_WRITE_ERROR) {
+
+            comment += sprintf(comment, " due to SD card write error.");
+
         }
 
     }
@@ -664,11 +689,11 @@ static void setHeaderComment(wavHeader_t *wavHeader, configSettings_t *configSet
 
 /* Function to write the GUANO data */
 
-static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, uint32_t currentTime, uint32_t *gpsLocationReceived, int32_t *gpsLastFixLatitude, int32_t *gpsLastFixLongitude, uint32_t *acousticLocationReceived, int32_t *acousticLatitude, int32_t *acousticLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID, char *filename, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature) {
+static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, uint32_t currentTime, bool gpsLocationReceived, int32_t *gpsLastFixLatitude, int32_t *gpsLastFixLongitude, bool acousticLocationReceived, int32_t *acousticLatitude, int32_t *acousticLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID, char *filename, AM_extendedBatteryState_t extendedBatteryState, int32_t temperature, AM_filterType_t filterType) {
 
-    uint32_t length = sprintf(buffer, "guan");
-    
-    length += UINT32_SIZE_IN_BYTES;
+    uint32_t length = sprintf(buffer, "guan") + UINT32_SIZE_IN_BYTES;
+
+    /* General information */
     
     length += sprintf(buffer + length, "GUANO|Version:1.0\nMake:Open Acoustic Devices\nModel:AudioMoth\nSerial:" SERIAL_NUMBER "\n", FORMAT_SERIAL_NUMBER(serialNumber));
 
@@ -679,6 +704,8 @@ static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, u
     }
 
     length += sprintf(buffer + length, "Firmware Version:%s (%u.%u.%u)\n", firmwareDescription, firmwareVersion[0], firmwareVersion[1], firmwareVersion[2]);
+
+    /* Timestamp */
 
     int32_t timezoneOffset = configSettings->timezoneHours * SECONDS_IN_HOUR + configSettings->timezoneMinutes * SECONDS_IN_MINUTE;
 
@@ -704,21 +731,23 @@ static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, u
 
     }
 
-    if (*gpsLocationReceived || *acousticLocationReceived || configSettings->enableSunRecording) {
+    /* Location position and source */
 
-        int32_t latitude = *gpsLocationReceived ? *gpsLastFixLatitude : *acousticLocationReceived ? *acousticLatitude : configSettings->latitude;
+    if (gpsLocationReceived || acousticLocationReceived || configSettings->enableSunRecording) {
 
-        int32_t longitude = *gpsLocationReceived ? *gpsLastFixLongitude : *acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
+        int32_t latitude = gpsLocationReceived ? *gpsLastFixLatitude : acousticLocationReceived ? *acousticLatitude : configSettings->latitude;
+
+        int32_t longitude = gpsLocationReceived ? *gpsLastFixLongitude : acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
 
         char *latitudeSign = latitude < 0 ? "-" : "";
 
         char *longitudeSign = longitude < 0 ? "-" : "";
 
-        if (*gpsLocationReceived) {
+        if (gpsLocationReceived) {
 
             length += sprintf(buffer + length, "Loc Position:%s%ld.%06ld %s%ld.%06ld\nOAD|Loc Source:GPS\n", latitudeSign, ABS(latitude) / GPS_LOCATION_PRECISION, ABS(latitude) % GPS_LOCATION_PRECISION, longitudeSign, ABS(longitude) / GPS_LOCATION_PRECISION, ABS(longitude) % GPS_LOCATION_PRECISION);
 
-        } else if (*acousticLocationReceived) {
+        } else if (acousticLocationReceived) {
 
             length += sprintf(buffer + length, "Loc Position:%s%ld.%06ld %s%ld.%06ld\nOAD|Loc Source:Acoustic chime\n", latitudeSign, ABS(latitude) / ACOUSTIC_LOCATION_PRECISION, ABS(latitude) % ACOUSTIC_LOCATION_PRECISION, longitudeSign, ABS(longitude) / ACOUSTIC_LOCATION_PRECISION, ABS(longitude) % ACOUSTIC_LOCATION_PRECISION);
 
@@ -730,20 +759,90 @@ static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, u
 
     }
 
+    /* Filename */
+
     char *start = strchr(filename, '/');
 
     length += sprintf(buffer + length, "Original Filename:%s\n", start ? start + 1 : filename);
 
+    /* Recording settings */
+
+    length += sprintf(buffer + length, "OAD|Recording Settings:%lu GAIN %u", configSettings->sampleRate / configSettings->sampleRateDivider, configSettings->gain);
+
+    bool frequencyTriggerEnabled = configSettings->enableFrequencyTrigger;
+
+    bool amplitudeThresholdEnabled = frequencyTriggerEnabled ? false : configSettings->amplitudeThreshold > 0 || configSettings->enableAmplitudeThresholdDecibelScale || configSettings->enableAmplitudeThresholdPercentageScale;
+
+    if (frequencyTriggerEnabled) {
+
+        length += sprintf(buffer + length, " FREQ %u %u ", FILTER_FREQ_MULTIPLIER * configSettings->frequencyTriggerCentreFrequency, 0x01 << configSettings->frequencyTriggerWindowLengthShift);
+
+        length += formatPercentage(buffer + length, configSettings->frequencyTriggerThresholdPercentageMantissa, configSettings->frequencyTriggerThresholdPercentageExponent);
+
+        length += sprintf(buffer + length, " %u", configSettings->minimumTriggerDuration);
+
+    }
+
+    uint32_t lowerFilterFreq = FILTER_FREQ_MULTIPLIER * configSettings->lowerFilterFreq;
+
+    uint32_t higherFilterFreq = FILTER_FREQ_MULTIPLIER * configSettings->higherFilterFreq;
+
+    if (filterType == LOW_PASS_FILTER) {
+
+        length += sprintf(buffer + length, " LPF %lu", higherFilterFreq);
+
+    } else if (filterType == BAND_PASS_FILTER) {
+
+        length += sprintf(buffer + length, " BPF %lu %lu", lowerFilterFreq, higherFilterFreq);
+
+    } else if (filterType == HIGH_PASS_FILTER) {
+
+        length += sprintf(buffer + length, " HPF %lu", lowerFilterFreq);
+
+    }
+
+    if (amplitudeThresholdEnabled) {
+
+        length += sprintf(buffer + length, " AMP ");
+
+        if (configSettings->enableAmplitudeThresholdDecibelScale && configSettings->enableAmplitudeThresholdPercentageScale == false) {
+
+            length += formatDecibels(buffer + length, configSettings->amplitudeThresholdDecibels, false);
+
+        } else if (configSettings->enableAmplitudeThresholdPercentageScale && configSettings->enableAmplitudeThresholdDecibelScale == false) {
+
+            length += formatPercentage(buffer + length, configSettings->amplitudeThresholdPercentageMantissa, configSettings->amplitudeThresholdPercentageExponent);
+
+        } else {
+
+            length += sprintf(buffer + length, "%u", configSettings->amplitudeThreshold);
+
+        }
+        
+        length += sprintf(buffer + length, " %u", configSettings->minimumTriggerDuration);
+
+    }
+
+    if (configSettings->enableLowGainRange) length += sprintf(buffer + length, " LGR");
+
+    if (configSettings->disable48HzDCBlockingFilter) length += sprintf(buffer + length, " D48");
+
+    if (isEnergySaverMode(configSettings)) length += sprintf(buffer + length, " ESM");
+
+    /* Battery and temperature */
+
     uint32_t batteryVoltage = extendedBatteryState == AM_EXT_BAT_LOW ? 24 : extendedBatteryState >= AM_EXT_BAT_FULL ? 50 : extendedBatteryState + AM_EXT_BAT_STATE_OFFSET / AM_BATTERY_STATE_INCREMENT;
 
-    length += sprintf(buffer + length, "OAD|Battery Voltage:%01lu.%01lu\n", batteryVoltage / 10, batteryVoltage % 10);
+    length += sprintf(buffer + length, "\nOAD|Battery Voltage:%01lu.%01lu\n", batteryVoltage / 10, batteryVoltage % 10);
     
     char *temperatureSign = temperature < 0 ? "-" : "";
 
     uint32_t temperatureInDecidegrees = ROUNDED_DIV(ABS(temperature), 100);
 
     length += sprintf(buffer + length, "Temperature Int:%s%lu.%lu", temperatureSign, temperatureInDecidegrees / 10, temperatureInDecidegrees % 10);
-    
+
+    /* Set GUANO chunk size */
+
     *(uint32_t*)(buffer + RIFF_ID_LENGTH) = length - sizeof(chunk_t);;
 
     return length;
@@ -752,7 +851,7 @@ static uint32_t writeGuanoData(char *buffer, configSettings_t *configSettings, u
 
 /* Function to write configuration to file */
 
-static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t currentTime, uint32_t *gpsLocationReceived, int32_t *gpsLatitude, int32_t *gpsLongitude, uint32_t *acousticLocationReceived, int32_t *acousticLatitude, int32_t *acousticLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID) {
+static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t currentTime, bool gpsLocationReceived, int32_t *gpsLatitude, int32_t *gpsLongitude, bool acousticLocationReceived, int32_t *acousticLatitude, int32_t *acousticLongitude, uint8_t *firmwareDescription, uint8_t *firmwareVersion, uint8_t *serialNumber, uint8_t *deploymentID, uint8_t *defaultDeploymentID) {
 
     static char configBuffer[CONFIG_BUFFER_LENGTH];
 
@@ -838,19 +937,19 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
     if (configSettings->enableSunRecording) {
 
-        int32_t latitude = *gpsLocationReceived ? *gpsLatitude : *acousticLocationReceived ? *acousticLatitude : configSettings->latitude;
+        int32_t latitude = gpsLocationReceived ? *gpsLatitude : acousticLocationReceived ? *acousticLatitude : configSettings->latitude;
 
-        int32_t longitude = *gpsLocationReceived ? *gpsLongitude : *acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
+        int32_t longitude = gpsLocationReceived ? *gpsLongitude : acousticLocationReceived ? *acousticLongitude : configSettings->longitude;
 
         char latitudeDirection = latitude < 0 ? 'S' : 'N';
 
         char longitudeDirection = longitude < 0 ? 'W' : 'E';
 
-        if (*gpsLocationReceived) {
+        if (gpsLocationReceived) {
 
             length = sprintf(configBuffer, "\r\n\r\nLocation                        : %ld.%06ld°%c %ld.%06ld°%c (GPS)", ABS(latitude) / GPS_LOCATION_PRECISION, ABS(latitude) % GPS_LOCATION_PRECISION, latitudeDirection, ABS(longitude) / GPS_LOCATION_PRECISION, ABS(longitude) % GPS_LOCATION_PRECISION, longitudeDirection);
 
-        } else if (*acousticLocationReceived) {
+        } else if (acousticLocationReceived) {
 
             length = sprintf(configBuffer, "\r\n\r\nLocation                        : %ld.%06ld°%c %ld.%06ld°%c (Acoustic chime)", ABS(latitude) / ACOUSTIC_LOCATION_PRECISION, ABS(latitude) % ACOUSTIC_LOCATION_PRECISION, latitudeDirection, ABS(longitude) / ACOUSTIC_LOCATION_PRECISION, ABS(longitude) % ACOUSTIC_LOCATION_PRECISION, longitudeDirection);
 
@@ -1055,7 +1154,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
         if (configSettings->enableAmplitudeThresholdDecibelScale && configSettings->enableAmplitudeThresholdPercentageScale == false) {
 
-            length += formatDecibels(configBuffer + length, configSettings->amplitudeThresholdDecibels);
+            length += formatDecibels(configBuffer + length, configSettings->amplitudeThresholdDecibels, true);
 
         } else if (configSettings->enableAmplitudeThresholdPercentageScale && configSettings->enableAmplitudeThresholdDecibelScale == false) {
 
@@ -1097,6 +1196,8 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
     length += sprintf(configBuffer + length, "Always require acoustic chime   : %s\r\n", configSettings->requireAcousticConfiguration ? "Yes" : "No");
 
+    length += sprintf(configBuffer + length, "Use device ID in WAV file name  : %s\r\n", configSettings->enableFilenameWithDeviceID ? "Yes" : "No");
+
     length += sprintf(configBuffer + length, "Use daily folder for WAV files  : %s\r\n\r\n", configSettings->enableDailyFolders ? "Yes" : "No");
 
     length += sprintf(configBuffer + length, "Disable 48Hz DC blocking filter : %s\r\n", configSettings->disable48HzDCBlockingFilter ? "Yes" : "No");
@@ -1105,9 +1206,27 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
     length += sprintf(configBuffer + length, "Enable low gain range           : %s\r\n\r\n", configSettings->enableLowGainRange ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable magnetic switch          : %s\r\n", configSettings->enableMagneticSwitch ? "Yes" : "No");
+    length += sprintf(configBuffer + length, "Enable magnetic switch          : %s\r\n\r\n", configSettings->enableMagneticSwitch ? "Yes" : "No");
 
-    length += sprintf(configBuffer + length, "Enable GPS time setting         : %s\r\n", configSettings->enableTimeSettingFromGPS ? "Yes" : "No");
+    RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
+
+    length = sprintf(configBuffer, "Enable GPS time setting         : %s\r\n", configSettings->enableTimeSettingFromGPS ? "Yes" : "No");
+
+    length += sprintf(configBuffer + length, "GPS fix before and after        : %s\r\n", configSettings->enableTimeSettingFromGPS == false ? "-" : configSettings->enableTimeSettingBeforeAndAfterRecordings ? "Individual recordings" : "Recording periods");
+
+    length += sprintf(configBuffer + length, "GPS fix time (mins)             : ");
+
+    if (configSettings->enableTimeSettingFromGPS) {
+
+        uint32_t gpsTimeSettingPeriod = configSettings->gpsTimeSettingPeriod == 0 ? GPS_DEFAULT_TIME_SETTING_PERIOD / SECONDS_IN_MINUTE : configSettings->gpsTimeSettingPeriod;
+
+        length += sprintf(configBuffer + length, "%ld\r\n", gpsTimeSettingPeriod);
+
+    } else {
+
+        length += sprintf(configBuffer + length, "-\r\n");
+
+    }
 
     RETURN_BOOL_ON_ERROR(AudioMoth_writeToFile(configBuffer, length));
 
@@ -1119,57 +1238,73 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
 /* Backup domain variables */
 
-static uint32_t *previousSwitchPosition = (uint32_t*)AM_BACKUP_DOMAIN_START_ADDRESS;
+static uint32_t *backupDomainFlags = (uint32_t*)AM_BACKUP_DOMAIN_START_ADDRESS;
 
-static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 4);
+static uint32_t *previousSwitchPosition = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 4);
 
-static uint32_t *indexOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
+static uint32_t *startOfRecordingPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 8);
 
-static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
+static uint32_t *timeOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 12);
 
-static uint32_t *timeOfNextGPSTimeSetting = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
+static uint32_t *indexOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 16);
 
-static uint32_t *writtenConfigurationToFile = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
+static uint32_t *durationOfNextRecording = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 20);
 
-static uint8_t *deploymentID = (uint8_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 24);
+static uint32_t *timeOfNextGPSTimeSetting = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 24);
 
-static uint32_t *readyToMakeRecordings = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 32);
+static uint8_t *deploymentID = (uint8_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 28);
 
-static uint32_t *shouldSetTimeFromGPS = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
+static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 36);
 
-static uint32_t *numberOfRecordingErrors = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
+static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 40);
 
-static uint32_t *recordingPreparationPeriod = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
+static int32_t *gpsLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 44);
 
-static uint32_t *waitingForMagneticSwitch = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
+static int32_t *gpsLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 48);
 
-static uint32_t *poweredDownWithShortWaitInterval = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
+static int32_t *gpsLastFixLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 52);
 
-static int32_t *gpsLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 56);
+static int32_t *gpsLastFixLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 56);
 
-static int32_t *gpsLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 60);
+static int32_t *acousticLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 60);
 
-static int32_t *gpsLastFixLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 64);
+static int32_t *acousticLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 64);
 
-static int32_t *gpsLastFixLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 68);
+static uint32_t *numberOfSunRecordingPeriods = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 68);
 
-static uint32_t *gpsLocationReceived = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 72);
+static recordingPeriod_t *firstSunRecordingPeriod = (recordingPeriod_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 72);
 
-static int32_t *acousticLatitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 76);
+static recordingPeriod_t *secondSunRecordingPeriod = (recordingPeriod_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 76);
 
-static int32_t *acousticLongitude = (int32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 80);
+static uint32_t *timeOfNextSunriseSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 80);
 
-static uint32_t *acousticLocationReceived = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 84);
+static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 84);
 
-static uint32_t *numberOfSunRecordingPeriods = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 88);
+/* Functions to query, set and clear backup domain flags */
 
-static recordingPeriod_t *firstSunRecordingPeriod = (recordingPeriod_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 92);
+typedef enum {
+    BACKUP_WRITTEN_CONFIGURATION_TO_FILE,
+    BACKUP_READY_TO_MAKE_RECORDING, 
+    BACKUP_MUST_SET_TIME_FROM_GPS, 
+    BACKUP_SHOULD_SET_TIME_FROM_GPS, 
+    BACKUP_WAITING_FOR_MAGNETIC_SWITCH,
+    BACKUP_POWERED_DOWN_WITH_SHORT_WAIT_INTERVAL,
+    BACKUP_GPS_LOCATION_RECEIVED,
+    BACKUP_ACOUSTIC_LOCATION_RECEIVED
+} AM_backupDomainFlag_t;
 
-static recordingPeriod_t *secondSunRecordingPeriod = (recordingPeriod_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 96);
+static inline bool getBackupFlag(AM_backupDomainFlag_t flag) {
+    uint32_t mask = (1 << flag);
+    return (*backupDomainFlags & mask) == mask;
+}
 
-static uint32_t *timeOfNextSunriseSunsetCalculation = (uint32_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 100);
-
-static configSettings_t *configSettings = (configSettings_t*)(AM_BACKUP_DOMAIN_START_ADDRESS + 104);
+static inline void setBackupFlag(AM_backupDomainFlag_t flag, bool state) {
+    if (state) {
+        *backupDomainFlags |= (1 << flag);
+    } else {
+        *backupDomainFlags &= ~(1 << flag);
+    }
+}
 
 /* Filter variables */
 
@@ -1193,9 +1328,11 @@ static volatile uint32_t numberOfDMATransfers;
 
 static volatile uint32_t numberOfDMATransfersToWait;
 
-/* Compression buffers */
+/* Write indicator buffer */
 
 static bool writeIndicator[NUMBER_OF_BUFFERS];
+
+/* Compression buffer */
 
 static int16_t compressionBuffer[COMPRESSION_BUFFER_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE];
 
@@ -1249,7 +1386,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 10, 1};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 11, 0};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -1293,14 +1430,6 @@ static void copyToBackupDomain(uint32_t *dst, uint8_t *src, uint32_t length) {
 
 }
 
-/* Function to select energy saver mode */
-
-static bool isEnergySaverMode(configSettings_t *configSettings) {
-
-    return configSettings->enableEnergySaverMode && configSettings->sampleRate / configSettings->sampleRateDivider <= ENERGY_SAVER_SAMPLE_RATE_THRESHOLD;
-
-}
-
 /* GPS time setting functions */
 
 static void writeGPSLogMessage(uint32_t currentTime, uint32_t currentMilliseconds, char *message) {
@@ -1319,25 +1448,37 @@ static void writeGPSLogMessage(uint32_t currentTime, uint32_t currentMillisecond
 
 }
 
-static GPS_fixResult_t setTimeFromGPS(bool enableLED, uint32_t timeout) {
+static GPS_fixResult_t setTimeFromGPS(bool enableLED, AM_gpsFixMode_t fixMode, uint32_t timeout) {
 
-    uint32_t currentTime, currentMilliseconds;
-
-    /* Enable GPS */
+    /* Enable GPS and get the current time */
 
     GPS_powerUpGPS();
 
     GPS_enableGPSInterface();
 
-    /* Enable GPS log file */
+    uint32_t currentTime, currentMilliseconds;
+
+    /* Open the GPS log file */
 
     bool success = AudioMoth_appendFile(GPS_FILENAME);
 
     /* Add power up message */
 
+    static char *messages[] = {
+        "GPS switched on for initial fix.",
+        "GPS switched on for fix before recording period.",
+        "GPS switched on for fix between recording periods.",
+        "GPS switched on for fix after recording period.",
+        "GPS switched on for fix before recording.",
+        "GPS switched on for fix between recordings.",
+        "GPS switched on for fix after recording."
+    };
+
+    char *message = messages[fixMode];
+
     AudioMoth_getTime(&currentTime, &currentMilliseconds);
 
-    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS powered up.");
+    writeGPSLogMessage(currentTime, currentMilliseconds, message);
 
     /* Set green LED and enter routine */
 
@@ -1367,7 +1508,7 @@ static GPS_fixResult_t setTimeFromGPS(bool enableLED, uint32_t timeout) {
 
     if (result == GPS_TIMEOUT) writeGPSLogMessage(currentTime, currentMilliseconds, "Time was not updated. Timed out.");
 
-    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS powered down.\r\n");
+    writeGPSLogMessage(currentTime, currentMilliseconds, "GPS switched off.\r\n");
 
     if (success) AudioMoth_closeFile();
 
@@ -1385,15 +1526,19 @@ static void startWaitingForMagneticSwitch() {
 
     /* Cancel any scheduled recording */
 
+    *indexOfNextRecording = 0;
+
     *timeOfNextRecording = UINT32_MAX;
 
-    *indexOfNextRecording = 0;
+    *startOfRecordingPeriod = UINT32_MAX;
 
     *durationOfNextRecording = UINT32_MAX;
 
     *timeOfNextGPSTimeSetting = UINT32_MAX;
 
-    *waitingForMagneticSwitch = true;
+    setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, false);
+
+    setBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH, true);
 
 }
 
@@ -1411,7 +1556,7 @@ static void stopWaitingForMagneticSwitch(uint32_t *currentTime, uint32_t *curren
 
     determineSunriseAndSunsetTimesAndScheduleRecording(scheduleTime);
 
-    *waitingForMagneticSwitch = false;
+    setBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH, false);
 
 }
 
@@ -1439,9 +1584,11 @@ int main(void) {
         
         /* Initialise recording schedule variables */
 
-        *timeOfNextRecording = 0;
-
         *indexOfNextRecording = 0;
+
+        *timeOfNextRecording = UINT32_MAX;
+
+        *startOfRecordingPeriod = UINT32_MAX;
 
         *durationOfNextRecording = UINT32_MAX;
 
@@ -1449,15 +1596,17 @@ int main(void) {
 
         /* Initialise configuration writing variable */
 
-        *writtenConfigurationToFile = false;
+        setBackupFlag(BACKUP_WRITTEN_CONFIGURATION_TO_FILE, false);
 
         /* Initialise recording state variables */
 
         *previousSwitchPosition = AM_SWITCH_NONE;
 
-        *shouldSetTimeFromGPS = false;
+        setBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS, false);
 
-        *readyToMakeRecordings = false;
+        setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, false);
+
+        setBackupFlag(BACKUP_READY_TO_MAKE_RECORDING, false);
 
         *numberOfRecordingErrors = 0;
 
@@ -1465,11 +1614,11 @@ int main(void) {
 
         /* Initialise magnetic switch state variables */
 
-        *waitingForMagneticSwitch = false;
+        setBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH, false);
 
         /* Initialise the power down interval flag */
 
-        *poweredDownWithShortWaitInterval = false;
+        setBackupFlag(BACKUP_POWERED_DOWN_WITH_SHORT_WAIT_INTERVAL, false);
 
         /* Initial GPS and sunrise and sunset variables */
 
@@ -1477,9 +1626,9 @@ int main(void) {
 
         *gpsLastFixLongitude = 0;
 
-        *gpsLocationReceived = false;
+        setBackupFlag(BACKUP_GPS_LOCATION_RECEIVED, false);
 
-        *acousticLocationReceived = false;
+        setBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED, false);
 
         *timeOfNextSunriseSunsetCalculation = 0;
 
@@ -1533,21 +1682,23 @@ int main(void) {
 
     if (switchPosition != *previousSwitchPosition) {
 
-        /* Reset the GPS flag */
+        /* Reset the GPS flags */
 
-        *shouldSetTimeFromGPS = false;
+        setBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS, false);
+
+        setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, false);
 
         /* Reset the power down interval flag */
 
-        *poweredDownWithShortWaitInterval = false;
+        setBackupFlag(BACKUP_POWERED_DOWN_WITH_SHORT_WAIT_INTERVAL, false);
 
         /* Check there are active recording periods if the switch is in CUSTOM position */
 
-        *readyToMakeRecordings = switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && (configSettings->activeRecordingPeriods > 0 || configSettings->enableSunRecording));
+        setBackupFlag(BACKUP_READY_TO_MAKE_RECORDING, switchPosition == AM_SWITCH_DEFAULT || (switchPosition == AM_SWITCH_CUSTOM && (configSettings->activeRecordingPeriods > 0 || configSettings->enableSunRecording)));
 
         /* Check if acoustic configuration is required */
 
-        if (*readyToMakeRecordings) {
+        if (getBackupFlag(BACKUP_READY_TO_MAKE_RECORDING)) {
 
             /* Determine if acoustic configuration is required */
 
@@ -1559,7 +1710,7 @@ int main(void) {
 
                 if (configSettings->requireAcousticConfiguration == false) shouldPerformAcousticConfiguration = false;
 
-                *shouldSetTimeFromGPS = true;
+                setBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS, true);
 
             }
 
@@ -1625,11 +1776,11 @@ int main(void) {
 
                     if (configSettings->requireAcousticConfiguration) {
 
-                        *readyToMakeRecordings = false;
+                        setBackupFlag(BACKUP_READY_TO_MAKE_RECORDING, false);
 
                     } else {
 
-                        *readyToMakeRecordings = AudioMoth_hasTimeBeenSet() || *shouldSetTimeFromGPS;
+                        setBackupFlag(BACKUP_READY_TO_MAKE_RECORDING, AudioMoth_hasTimeBeenSet() || getBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS));
 
                     }
 
@@ -1649,7 +1800,7 @@ int main(void) {
 
         /* Calculate time of next recording if ready to make a recording */
 
-        if (*readyToMakeRecordings) {
+        if (getBackupFlag(BACKUP_READY_TO_MAKE_RECORDING)) {
 
             /* Enable energy saver mode */
 
@@ -1665,7 +1816,7 @@ int main(void) {
 
             /* Reset persistent configuration write flag */
 
-            *writtenConfigurationToFile = false;
+            setBackupFlag(BACKUP_WRITTEN_CONFIGURATION_TO_FILE, false);
 
             /* Reset GPS and sunrise and sunset variables */
 
@@ -1673,13 +1824,13 @@ int main(void) {
 
             *gpsLastFixLongitude = 0;
 
-            *gpsLocationReceived = false;
+            setBackupFlag(BACKUP_GPS_LOCATION_RECEIVED, false);
 
             *timeOfNextSunriseSunsetCalculation = 0;
 
             /* Try to write configuration now if it will not be written later when time is set */
 
-            if (configSettings->enableSunRecording == false || *shouldSetTimeFromGPS == false) {
+            if (configSettings->enableSunRecording == false || getBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS) == false) {
 
                 fileSystemEnabled = AudioMoth_enableFileSystem(configSettings->sampleRateDivider == 1 ? AM_SD_CARD_HIGH_SPEED : AM_SD_CARD_NORMAL_SPEED);
 
@@ -1687,7 +1838,13 @@ int main(void) {
                     
                     AudioMoth_getTime(&currentTime, &currentMilliseconds);
 
-                    *writtenConfigurationToFile = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+                    bool gpsLocationReceived = getBackupFlag(BACKUP_GPS_LOCATION_RECEIVED);
+
+                    bool acousticLocationReceived = getBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED);
+
+                    bool success = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+                    setBackupFlag(BACKUP_WRITTEN_CONFIGURATION_TO_FILE, success);
 
                 }
 
@@ -1703,19 +1860,25 @@ int main(void) {
 
             if (switchPosition == AM_SWITCH_CUSTOM) {
 
-                *waitingForMagneticSwitch = configSettings->enableMagneticSwitch;
+                setBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH, configSettings->enableMagneticSwitch);
 
-                if (configSettings->enableMagneticSwitch || *shouldSetTimeFromGPS) {
+                if (configSettings->enableMagneticSwitch || getBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS)) {
+
+                    *indexOfNextRecording = 0;
 
                     *timeOfNextRecording = UINT32_MAX;
 
-                    *indexOfNextRecording = 0; 
+                    *startOfRecordingPeriod = UINT32_MAX;
 
                     *durationOfNextRecording = UINT32_MAX;
 
                     *timeOfNextGPSTimeSetting = UINT32_MAX;
 
                 } else {
+
+                    *timeOfNextRecording = UINT32_MAX;
+
+                    *startOfRecordingPeriod = UINT32_MAX;
 
                     determineSunriseAndSunsetTimesAndScheduleRecording(scheduleTime);
 
@@ -1727,9 +1890,11 @@ int main(void) {
 
             if (switchPosition == AM_SWITCH_DEFAULT) {
 
+                *indexOfNextRecording = 0; 
+
                 *timeOfNextRecording = scheduleTime;
 
-                *indexOfNextRecording = 0; 
+                *startOfRecordingPeriod = scheduleTime;
 
                 *durationOfNextRecording = UINT32_MAX;
 
@@ -1743,7 +1908,7 @@ int main(void) {
     
     /* If not ready to make a recording then flash LED and power down */
 
-    if (*readyToMakeRecordings == false) {
+    if (getBackupFlag(BACKUP_READY_TO_MAKE_RECORDING) == false) {
 
         FLASH_LED(Both, SHORT_LED_FLASH_DURATION)
 
@@ -1761,9 +1926,9 @@ int main(void) {
 
     bool enableLED = (switchPosition == AM_SWITCH_DEFAULT) || configSettings->enableLED;
 
-    bool shouldSuppressLED = *poweredDownWithShortWaitInterval;
+    bool shouldSuppressLED = getBackupFlag(BACKUP_POWERED_DOWN_WITH_SHORT_WAIT_INTERVAL);
 
-    *poweredDownWithShortWaitInterval = false;
+    setBackupFlag(BACKUP_POWERED_DOWN_WITH_SHORT_WAIT_INTERVAL, false);
 
     /* Calculate time until next activity */
 
@@ -1777,7 +1942,9 @@ int main(void) {
 
     int64_t timeSinceScheduledGPSTimeSetting = -timeUntilNextGPSTimeSetting;
 
-    if (timeSinceScheduledGPSTimeSetting > GPS_MAX_TIME_SETTING_PERIOD * MILLISECONDS_IN_SECOND) {
+    uint32_t gpsTimeSettingPeriod = configSettings->gpsTimeSettingPeriod == 0 ? GPS_DEFAULT_TIME_SETTING_PERIOD : configSettings->gpsTimeSettingPeriod * SECONDS_IN_MINUTE;
+
+    if (timeSinceScheduledGPSTimeSetting > gpsTimeSettingPeriod * MILLISECONDS_IN_SECOND) {
 
         *timeOfNextGPSTimeSetting = UINT32_MAX;
 
@@ -1787,13 +1954,13 @@ int main(void) {
 
     /* Set the time from the GPS */
 
-    if (*shouldSetTimeFromGPS && *waitingForMagneticSwitch == false) {
+    if (getBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS) && getBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH) == false) {
 
         /* Enable the file system and set the time from the GPS */
 
         if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(AM_SD_CARD_NORMAL_SPEED);
             
-        GPS_fixResult_t fixResult = setTimeFromGPS(true, currentTime + GPS_MAX_TIME_SETTING_PERIOD);
+        GPS_fixResult_t fixResult = setTimeFromGPS(true, INITIAL_GPS_FIX, currentTime + GPS_INITIAL_TIME_SETTING_PERIOD);
 
         /* Update the schedule if successful */
 
@@ -1801,11 +1968,11 @@ int main(void) {
 
             /* Reset the flag */
 
-            *shouldSetTimeFromGPS = false;
+            setBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS, false);
 
             /* Update the GPS location */
 
-            *gpsLocationReceived = true;
+            setBackupFlag(BACKUP_GPS_LOCATION_RECEIVED, true);
 
             *gpsLatitude = *gpsLastFixLatitude;
 
@@ -1816,8 +1983,14 @@ int main(void) {
             if (configSettings->enableSunRecording && fileSystemEnabled) {
 
                 AudioMoth_getTime(&currentTime, &currentMilliseconds);
-                
-                *writtenConfigurationToFile = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+                bool gpsLocationReceived = getBackupFlag(BACKUP_GPS_LOCATION_RECEIVED);
+
+                bool acousticLocationReceived = getBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED);
+
+                bool success = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+                setBackupFlag(BACKUP_WRITTEN_CONFIGURATION_TO_FILE, success);
 
             }
 
@@ -1851,11 +2024,21 @@ int main(void) {
 
         /* Write configuration if not already done so */
 
-        if (*writtenConfigurationToFile == false) {
+        if (getBackupFlag(BACKUP_WRITTEN_CONFIGURATION_TO_FILE) == false) {
 
             if (!fileSystemEnabled) fileSystemEnabled = AudioMoth_enableFileSystem(configSettings->sampleRateDivider == 1 ? AM_SD_CARD_HIGH_SPEED : AM_SD_CARD_NORMAL_SPEED);
 
-            if (fileSystemEnabled) *writtenConfigurationToFile = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+            if (fileSystemEnabled) {
+
+                bool gpsLocationReceived = getBackupFlag(BACKUP_GPS_LOCATION_RECEIVED);
+
+                bool acousticLocationReceived = getBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED);
+
+                bool success = writeConfigurationToFile(configSettings, currentTime, gpsLocationReceived, gpsLatitude, gpsLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID);
+
+                setBackupFlag(BACKUP_WRITTEN_CONFIGURATION_TO_FILE, success);
+
+            }
 
         }
 
@@ -1961,11 +2144,13 @@ int main(void) {
 
             /* Cancel the schedule */
 
-            *timeOfNextRecording = UINT32_MAX;
-
             *indexOfNextRecording = 0; 
 
-            *durationOfNextRecording = 0;
+            *timeOfNextRecording = UINT32_MAX;
+
+            *startOfRecordingPeriod = UINT32_MAX;
+
+            *durationOfNextRecording = UINT32_MAX;
 
             *timeOfNextGPSTimeSetting = UINT32_MAX;
 
@@ -1987,9 +2172,11 @@ int main(void) {
 
             /* Set parameters to start recording now */
 
+            *indexOfNextRecording = 0; 
+
             *timeOfNextRecording = scheduleTime;
 
-            *indexOfNextRecording = 0; 
+            *startOfRecordingPeriod = scheduleTime;
 
             *durationOfNextRecording = UINT32_MAX;
 
@@ -2003,6 +2190,8 @@ int main(void) {
             
             startWaitingForMagneticSwitch();
 
+            setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, false);
+
             SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);
 
         }
@@ -2015,7 +2204,7 @@ int main(void) {
 
             if (timeUntilPreparationStart < DEFAULT_WAIT_INTERVAL) {
 
-                *poweredDownWithShortWaitInterval = true;
+                setBackupFlag(BACKUP_POWERED_DOWN_WITH_SHORT_WAIT_INTERVAL, true);
 
                 SAVE_SWITCH_POSITION_AND_POWER_DOWN(SHORT_WAIT_INTERVAL);
 
@@ -2031,17 +2220,29 @@ int main(void) {
 
     /* Update the time from the GPS */
     
-    if (timeUntilNextGPSTimeSetting <= 0 && timeUntilPreparationStart > GPS_MIN_TIME_SETTING_PERIOD * MILLISECONDS_IN_SECOND) {
+    if ((timeUntilNextGPSTimeSetting <= 0 || getBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS)) && timeUntilPreparationStart > GPS_MIN_TIME_SETTING_PERIOD * MILLISECONDS_IN_SECOND) {
 
         /* Set the time from the GPS */
 
         AudioMoth_enableFileSystem(AM_SD_CARD_NORMAL_SPEED);
 
-        GPS_fixResult_t fixResult = setTimeFromGPS(enableLED, *timeOfNextRecording - ROUNDED_UP_DIV(*recordingPreparationPeriod, MILLISECONDS_IN_SECOND));
+        AM_gpsFixMode_t fixMode = configSettings->enableTimeSettingBeforeAndAfterRecordings ? GPS_FIX_BEFORE_INDIVIDUAL_RECORDING : GPS_FIX_BEFORE_RECORDING_PERIOD;
+        
+        if (getBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS)) fixMode += 1;
 
-        /* Update the next scheduled GPS fix time */
+        if (timeUntilNextGPSTimeSetting > 0) fixMode += 1;
 
-        *timeOfNextGPSTimeSetting = UINT32_MAX;
+        uint32_t gpsTimeSettingPeriod = configSettings->gpsTimeSettingPeriod == 0 ? GPS_DEFAULT_TIME_SETTING_PERIOD : configSettings->gpsTimeSettingPeriod * SECONDS_IN_MINUTE;
+
+        uint32_t timeOut = MIN(*timeOfNextRecording - ROUNDED_UP_DIV(*recordingPreparationPeriod, MILLISECONDS_IN_SECOND) - GPS_TIME_SETTING_MARGIN, currentTime + gpsTimeSettingPeriod);
+
+        GPS_fixResult_t fixResult = setTimeFromGPS(enableLED, fixMode, timeOut);
+
+        /* Update flag and next scheduled GPS fix time */
+
+        if (timeUntilNextGPSTimeSetting <= 0) *timeOfNextGPSTimeSetting = UINT32_MAX;
+
+        setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, false);
 
         /* If time setting was cancelled with the magnet switch then start waiting for the magnetic switch */
 
@@ -2053,6 +2254,10 @@ int main(void) {
 
     } 
 
+    /* Update the post-recording GPS flag if the previous condition was not met */
+
+    setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, false);
+
     /* Power down if switch position has changed */
 
     if (switchPosition != *previousSwitchPosition) SAVE_SWITCH_POSITION_AND_POWER_DOWN(DEFAULT_WAIT_INTERVAL);
@@ -2063,7 +2268,7 @@ int main(void) {
 
     uint32_t waitIntervalSeconds = WAITING_LED_FLASH_INTERVAL / MILLISECONDS_IN_SECOND;
 
-    if (*waitingForMagneticSwitch) {
+    if (getBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH)) {
         
         waitIntervalMilliseconds *= MAGNETIC_SWITCH_WAIT_MULTIPLIER;
 
@@ -2087,11 +2292,11 @@ int main(void) {
 
         if (magneticSwitchEvent) {
 
-            if (*waitingForMagneticSwitch) {
+            if (getBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH)) {
 
                 stopWaitingForMagneticSwitch(&currentTime, &currentMilliseconds);
 
-                if (switchPosition == AM_SWITCH_CUSTOM && configSettings->enableTimeSettingFromGPS) *shouldSetTimeFromGPS = true;
+                if (switchPosition == AM_SWITCH_CUSTOM && configSettings->enableTimeSettingFromGPS) setBackupFlag(BACKUP_MUST_SET_TIME_FROM_GPS, true);
 
             } else {
 
@@ -2117,7 +2322,7 @@ int main(void) {
 
         /* Flash LED */
 
-        bool shouldFlashLED = *waitingForMagneticSwitch || (enableLED && shouldSuppressLED == false && timeToEarliestEvent > MINIMUM_LED_FLASH_INTERVAL);
+        bool shouldFlashLED = getBackupFlag(BACKUP_WAITING_FOR_MAGNETIC_SWITCH) || (enableLED && shouldSuppressLED == false && timeToEarliestEvent > MINIMUM_LED_FLASH_INTERVAL);
 
         if (shouldFlashLED) {
 
@@ -2305,7 +2510,7 @@ inline void GPS_handleFixEvent(uint32_t time, uint32_t milliseconds, GPS_fixTime
 
     uint32_t length = sprintf(fixBuffer, "Received GPS fix - %ld.%06ld°%c %ld.%06ld°%c ", ABS(*gpsLastFixLatitude) / GPS_LOCATION_PRECISION, ABS(*gpsLastFixLatitude) % GPS_LOCATION_PRECISION, fixPosition->latitudeDirection, ABS(*gpsLastFixLongitude) / GPS_LOCATION_PRECISION, ABS(*gpsLastFixLongitude) % GPS_LOCATION_PRECISION, fixPosition->longitudeDirection);
     
-    sprintf(fixBuffer + length, "(%02u°%02u.%04u'%c %03u°%02u.%04u'%c) at %02u/%02u/%04u %02u:%02u:%02u.%03u UTC.", fixPosition->latitudeDegrees, fixPosition->latitudeMinutes, fixPosition->latitudeTenThousandths, fixPosition->latitudeDirection, fixPosition->longitudeDegrees, fixPosition->longitudeMinutes, fixPosition->longitudeTenThousandths, fixPosition->longitudeDirection, fixTime->day, fixTime->month, fixTime->year, fixTime->hours, fixTime->minutes, fixTime->seconds, fixTime->milliseconds);
+    sprintf(fixBuffer + length, "at %02u/%02u/%04u %02u:%02u:%02u.%03u UTC.", fixTime->day, fixTime->month, fixTime->year, fixTime->hours, fixTime->minutes, fixTime->seconds, fixTime->milliseconds);
 
     writeGPSLogMessage(time, milliseconds, fixBuffer);
 
@@ -2571,7 +2776,7 @@ inline void AudioConfig_handleAudioConfigurationPacket(uint8_t *receiveBuffer, u
 
             memcpy(&location, receiveBuffer + standardPacketSize, ACOUSTIC_LOCATION_SIZE_IN_BYTES);
 
-            *acousticLocationReceived = true;
+            setBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED, true);
 
             *acousticLatitude = location.latitude;
             
@@ -2633,7 +2838,7 @@ static void encodeCompressionBuffer(uint32_t numberOfCompressedBuffers) {
 
 /* Generate foldername and filename from time */
 
-static void generateFolderAndFilename(char *foldername, char *filename, uint32_t timestamp, bool prefixFoldername, bool triggeredRecording) {
+static void generateFolderAndFilename(char *foldername, char *filename, uint32_t timestamp, bool triggeredRecording) {
 
     struct tm time;
 
@@ -2643,7 +2848,21 @@ static void generateFolderAndFilename(char *foldername, char *filename, uint32_t
 
     sprintf(foldername, "%04d%02d%02d", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday);
 
-    uint32_t length = prefixFoldername ? sprintf(filename, "%s/", foldername) : 0;
+    uint32_t length = 0;
+    
+    if (configSettings->enableDailyFolders) {
+
+        length += sprintf(filename, "%s/", foldername);
+
+    } 
+    
+    if (configSettings->enableFilenameWithDeviceID) {
+
+        uint8_t *source = memcmp(deploymentID, defaultDeploymentID, DEPLOYMENT_ID_LENGTH) ? deploymentID : (uint8_t*)AM_UNIQUE_ID_START_ADDRESS;
+
+        length += sprintf(filename + length, SERIAL_NUMBER "_", FORMAT_SERIAL_NUMBER(source));
+
+    }
     
     length += sprintf(filename + length, "%s_%02d%02d%02d", foldername, time.tm_hour, time.tm_min, time.tm_sec);
 
@@ -2703,14 +2922,6 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     }
 
-    /* Calculate the sample multiplier */
-
-    float sampleMultiplier = 16.0f / (float)(configSettings->oversampleRate * configSettings->sampleRateDivider);
-
-    if (AudioMoth_hasInvertedOutput()) sampleMultiplier = -sampleMultiplier;
-
-    DigitalFilter_setAdditionalGain(sampleMultiplier);
-
     /* Calculate the number of samples in each DMA transfer (while ensuring that number of samples written to the SRAM buffer on each DMA transfer is a power of two so each SRAM buffer is filled after an integer number of DMA transfers) */
 
     numberOfRawSamplesInDMATransfer = MAXIMUM_SAMPLES_IN_DMA_TRANSFER / configSettings->sampleRateDivider;
@@ -2733,7 +2944,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     bool supplyVoltageLow = false;
 
-    /* Initialise microphone for recording */
+    /* Enable the external SRAM and microphone and initialise direct memory access */
 
     AudioMoth_enableExternalSRAM();
 
@@ -2742,6 +2953,16 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
     bool externalMicrophone = AudioMoth_enableMicrophone(gainRange, configSettings->gain, configSettings->clockDivider, configSettings->acquisitionCycles, configSettings->oversampleRate);
 
     AudioMoth_initialiseDirectMemoryAccess(primaryBuffer, secondaryBuffer, numberOfRawSamplesInDMATransfer);
+
+    /* Calculate the sample multiplier */
+
+    float sampleMultiplier = 16.0f / (float)(configSettings->oversampleRate * configSettings->sampleRateDivider);
+
+    if (AudioMoth_hasInvertedOutput()) sampleMultiplier = -sampleMultiplier;
+
+    if (externalMicrophone) sampleMultiplier = -sampleMultiplier;
+
+    DigitalFilter_setAdditionalGain(sampleMultiplier);
 
     /* Determine if amplitude threshold is enabled */
 
@@ -2769,6 +2990,14 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     }
 
+    /* Set the initial header comment details */
+
+    AM_recordingState_t recordingState = SDCARD_WRITE_ERROR;
+
+    setHeaderDetails(&wavHeader, effectiveSampleRate, 0, 0);
+
+    setHeaderComment(&wavHeader, configSettings, timeOfNextRecording, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID, extendedBatteryState, temperature, externalMicrophone, recordingState, requestedFilterType);
+
     /* Show LED for SD card activity */
 
     if (enableLED) AudioMoth_setRedLED(true);
@@ -2779,7 +3008,7 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     static char foldername[MAXIMUM_FILE_NAME_LENGTH];
 
-    generateFolderAndFilename(foldername, filename, timeOfNextRecording, configSettings->enableDailyFolders, frequencyTriggerEnabled || amplitudeThresholdEnabled);
+    generateFolderAndFilename(foldername, filename, timeOfNextRecording, frequencyTriggerEnabled || amplitudeThresholdEnabled);
 
     if (configSettings->enableDailyFolders) {
 
@@ -2790,6 +3019,14 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
     }
 
     FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_openFile(filename));
+
+    /* Write the header */
+
+    FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(&wavHeader, sizeof(wavHeader_t)));    
+
+    FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_syncFile());
+
+    FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_seekInFile(0));
 
     AudioMoth_setRedLED(false);
 
@@ -2913,11 +3150,15 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
                 if (shouldWriteThisSector) {
 
+                    if (buffersProcessed == 0) memcpy(buffers[readBuffer], &wavHeader, sizeof(wavHeader_t));
+                        
                     FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(buffers[readBuffer], NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamplesToWrite));
 
                 } else {
 
                     clearCompressionBuffer();
+
+                    uint32_t blankBuffersWritten = 0;
 
                     uint32_t numberOfBlankSamplesToWrite = numberOfSamplesToWrite;
 
@@ -2925,9 +3166,17 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
                         uint32_t numberOfSamples = MIN(numberOfBlankSamplesToWrite, COMPRESSION_BUFFER_SIZE_IN_BYTES / NUMBER_OF_BYTES_IN_SAMPLE);
 
+                        bool writeHeader = buffersProcessed == 0 && blankBuffersWritten == 0 && numberOfSamples >= sizeof(wavHeader_t) / NUMBER_OF_BYTES_IN_SAMPLE;
+
+                        if (writeHeader) memcpy(compressionBuffer, &wavHeader, sizeof(wavHeader_t));
+
                         FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(compressionBuffer, NUMBER_OF_BYTES_IN_SAMPLE * numberOfSamples));
+                            
+                        if (writeHeader) memset(compressionBuffer, 0, sizeof(wavHeader_t));
 
                         numberOfBlankSamplesToWrite -= numberOfSamples;
+
+                        blankBuffersWritten += 1;
 
                     }
 
@@ -2987,12 +3236,12 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     /* Determine recording state */
 
-    AM_recordingState_t recordingState = microphoneChanged ? MICROPHONE_CHANGED :
-                                         switchPositionChanged ? SWITCH_CHANGED :
-                                         magneticSwitch ? MAGNETIC_SWITCH :
-                                         supplyVoltageLow ? SUPPLY_VOLTAGE_LOW :
-                                         fileSizeLimited ? FILE_SIZE_LIMITED :
-                                         RECORDING_OKAY;
+    recordingState = microphoneChanged ? MICROPHONE_CHANGED :
+                     switchPositionChanged ? SWITCH_CHANGED :
+                     magneticSwitch ? MAGNETIC_SWITCH :
+                     supplyVoltageLow ? SUPPLY_VOLTAGE_LOW :
+                     fileSizeLimited ? FILE_SIZE_LIMITED :
+                     RECORDING_OKAY;
 
     /* Generate the new file name if necessary */
     
@@ -3000,13 +3249,17 @@ static AM_recordingState_t makeRecording(uint32_t timeOfNextRecording, uint32_t 
 
     if (timeOffset > 0) {
 
-        generateFolderAndFilename(foldername, newFilename, timeOfNextRecording + timeOffset, configSettings->enableDailyFolders, frequencyTriggerEnabled || amplitudeThresholdEnabled);
+        generateFolderAndFilename(foldername, newFilename, timeOfNextRecording + timeOffset, frequencyTriggerEnabled || amplitudeThresholdEnabled);
 
     }
 
     /* Write the GUANO data */
 
-    uint32_t guanoDataSize = writeGuanoData((char*)compressionBuffer, configSettings, timeOfNextRecording + timeOffset, gpsLocationReceived, gpsLastFixLatitude, gpsLastFixLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID, timeOffset > 0 ? newFilename : filename, extendedBatteryState, temperature);
+    bool gpsLocationReceived = getBackupFlag(BACKUP_GPS_LOCATION_RECEIVED);
+
+    bool acousticLocationReceived = getBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED);
+
+    uint32_t guanoDataSize = writeGuanoData((char*)compressionBuffer, configSettings, timeOfNextRecording + timeOffset, gpsLocationReceived, gpsLastFixLatitude, gpsLastFixLongitude, acousticLocationReceived, acousticLatitude, acousticLongitude, firmwareDescription, firmwareVersion, (uint8_t*)AM_UNIQUE_ID_START_ADDRESS, deploymentID, defaultDeploymentID, timeOffset > 0 ? newFilename : filename, extendedBatteryState, temperature, requestedFilterType);
 
     FLASH_LED_AND_RETURN_ON_ERROR(AudioMoth_writeToFile(compressionBuffer, guanoDataSize));
 
@@ -3056,9 +3309,11 @@ static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentT
 
     uint32_t scheduleTime = currentTime;
 
-    /* Calculate initial sunrise and sunset time if appropriate */
+    uint32_t currentTimeOfNextRecording = *timeOfNextRecording;
 
-    uint32_t startOfRecordingPeriod;
+    uint32_t currentStartOfRecordingPeriod = *startOfRecordingPeriod;
+
+    /* Calculate initial sunrise and sunset time if appropriate */
 
     if (configSettings->enableSunRecording && *timeOfNextSunriseSunsetCalculation == 0) {
 
@@ -3070,13 +3325,13 @@ static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentT
 
         determineTimeOfNextSunriseSunsetCalculation(scheduleTime, timeOfNextSunriseSunsetCalculation);
 
-        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, &startOfRecordingPeriod, NULL);
+        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, startOfRecordingPeriod, NULL);
 
         if (*timeOfNextSunriseSunsetCalculation < *timeOfNextRecording) *timeOfNextSunriseSunsetCalculation += SECONDS_IN_DAY;
     
     } else {
 
-        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, &startOfRecordingPeriod, NULL);
+        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, startOfRecordingPeriod, NULL);
   
     }
 
@@ -3090,15 +3345,37 @@ static void determineSunriseAndSunsetTimesAndScheduleRecording(uint32_t currentT
 
         determineTimeOfNextSunriseSunsetCalculation(scheduleTime, timeOfNextSunriseSunsetCalculation);
 
-        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, &startOfRecordingPeriod, NULL);
+        scheduleRecording(scheduleTime, timeOfNextRecording, indexOfNextRecording, durationOfNextRecording, startOfRecordingPeriod, NULL);
 
         if (*timeOfNextSunriseSunsetCalculation < *timeOfNextRecording) *timeOfNextSunriseSunsetCalculation += SECONDS_IN_DAY;
 
     }
 
-    /* Update GPS time setting time */
+    /* Finished if not using GPS */
 
-    *timeOfNextGPSTimeSetting = configSettings->enableTimeSettingFromGPS ? startOfRecordingPeriod - GPS_MAX_TIME_SETTING_PERIOD : UINT32_MAX;
+    if (configSettings->enableTimeSettingFromGPS == false) return;
+
+    /* Update GPS time setting time */
+    
+    bool shouldSetTimeFromGPS = false;
+
+    uint32_t gpsTimeSettingPeriod = configSettings->gpsTimeSettingPeriod == 0 ? GPS_DEFAULT_TIME_SETTING_PERIOD : configSettings->gpsTimeSettingPeriod * SECONDS_IN_MINUTE;
+
+    if (configSettings->enableTimeSettingBeforeAndAfterRecordings) {
+
+        *timeOfNextGPSTimeSetting = *timeOfNextRecording - gpsTimeSettingPeriod;
+
+        shouldSetTimeFromGPS = currentTimeOfNextRecording != UINT32_MAX && currentTimeOfNextRecording != *timeOfNextRecording;
+
+    } else {
+
+        *timeOfNextGPSTimeSetting = *startOfRecordingPeriod - gpsTimeSettingPeriod;
+
+        shouldSetTimeFromGPS = currentStartOfRecordingPeriod != UINT32_MAX && currentStartOfRecordingPeriod != *startOfRecordingPeriod;
+
+    }
+
+    setBackupFlag(BACKUP_SHOULD_SET_TIME_FROM_GPS, shouldSetTimeFromGPS);
 
 }
 
@@ -3184,9 +3461,9 @@ static void determineSunriseAndSunsetTimes(uint32_t currentTime) {
 
     uint32_t sunriseMinutes, sunsetMinutes;
 
-    float latitude = *gpsLocationReceived ? (float)*gpsLatitude / (float)GPS_LOCATION_PRECISION : *acousticLocationReceived ? (float)*acousticLatitude / (float)ACOUSTIC_LOCATION_PRECISION : (float)configSettings->latitude / (float)CONFIG_LOCATION_PRECISION;
+    float latitude = getBackupFlag(BACKUP_GPS_LOCATION_RECEIVED) ? (float)*gpsLatitude / (float)GPS_LOCATION_PRECISION : getBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED) ? (float)*acousticLatitude / (float)ACOUSTIC_LOCATION_PRECISION : (float)configSettings->latitude / (float)CONFIG_LOCATION_PRECISION;
 
-    float longitude = *gpsLocationReceived ? (float)*gpsLongitude / (float)GPS_LOCATION_PRECISION : *acousticLocationReceived ? (float)*acousticLongitude / (float)ACOUSTIC_LOCATION_PRECISION : (float)configSettings->longitude / (float)CONFIG_LOCATION_PRECISION;
+    float longitude = getBackupFlag(BACKUP_GPS_LOCATION_RECEIVED) ? (float)*gpsLongitude / (float)GPS_LOCATION_PRECISION : getBackupFlag(BACKUP_ACOUSTIC_LOCATION_RECEIVED) ? (float)*acousticLongitude / (float)ACOUSTIC_LOCATION_PRECISION : (float)configSettings->longitude / (float)CONFIG_LOCATION_PRECISION;
 
     Sunrise_calculateFromUnix(configSettings->sunRecordingEvent, currentTime, latitude, longitude, &solution, &trend, &sunriseMinutes, &sunsetMinutes);
 
