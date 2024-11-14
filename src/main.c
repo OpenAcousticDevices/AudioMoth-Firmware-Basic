@@ -1066,13 +1066,13 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
         if (time.tm_hour == 0 && time.tm_min == 0 && time.tm_sec == 0) {
 
-            length += sprintf(configBuffer + length, "\r\nFirst recording date            : ");
+            length = sprintf(configBuffer, "\r\n\r\nFirst recording date            : ");
 
             length += sprintf(configBuffer + length, "%04d-%02d-%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, timezoneBuffer);
 
         } else {
 
-            length += sprintf(configBuffer + length, "\r\nFirst recording time            : ");
+            length = sprintf(configBuffer, "\r\n\r\nFirst recording time            : ");
 
             length += sprintf(configBuffer + length, "%04d-%02d-%02d %02d:%02d:%02d (%s)", YEAR_OFFSET + time.tm_year, MONTH_OFFSET + time.tm_mon, time.tm_mday, time.tm_hour, time.tm_min, time.tm_sec, timezoneBuffer);
 
