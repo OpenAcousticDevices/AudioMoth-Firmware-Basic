@@ -5,9 +5,9 @@
  *****************************************************************************/
 
 #include "biquad.h"
-#include "audioMoth.h"
+#include "audiomoth.h"
 #include "butterworth.h"
-#include "audioConfig.h"
+#include "audioconfig.h"
 
 /* Audio configuration constants */
 
