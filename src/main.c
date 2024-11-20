@@ -967,7 +967,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
         length += sprintf(configBuffer + length, "\r\nSun recording mode              : ");
         
-        if (configSettings->sunRecordingEvent == 0) {
+        if (configSettings->sunRecordingEvent == SR_SUNRISE_AND_SUNSET) {
 
             length += sprintf(configBuffer + length, "%s", sunriseSunsetModes[configSettings->sunRecordingMode]);
 
@@ -977,9 +977,9 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
         }
 
-        char *sunriseText = configSettings->sunRecordingEvent == 0 ? "\r\nSunrise - before, after (mins)  " : "\r\nDawn - before, after (mins)     ";
+        char *sunriseText = configSettings->sunRecordingEvent == SR_SUNRISE_AND_SUNSET ? "\r\nSunrise - before, after (mins)  " : "\r\nDawn - before, after (mins)     ";
 
-        char *sunsetText = configSettings->sunRecordingEvent == 0 ? "\r\nSunset - before, after (mins)   " : "\r\nDusk - before, after (mins)     ";
+        char *sunsetText = configSettings->sunRecordingEvent == SR_SUNRISE_AND_SUNSET ? "\r\nSunset - before, after (mins)   " : "\r\nDusk - before, after (mins)     ";
 
         if (configSettings->sunRecordingMode == SUNRISE_RECORDING) {
 
@@ -1008,7 +1008,7 @@ static bool writeConfigurationToFile(configSettings_t *configSettings, uint32_t 
 
         }
 
-        char *roundingText = configSettings->sunRecordingEvent == 0 ? "\r\nSunrise/sunset rounding (mins)  : %u" : "\r\nDawn/dusk rounding (mins)       : %u";
+        char *roundingText = configSettings->sunRecordingEvent == SR_SUNRISE_AND_SUNSET ? "\r\nSunrise/sunset rounding (mins)  : %u" : "\r\nDawn/dusk rounding (mins)       : %u";
 
         length += sprintf(configBuffer + length, roundingText, configSettings->sunRoundingMinutes);
 
