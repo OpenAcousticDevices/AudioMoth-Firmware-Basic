@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include <complex.h>
 
-#include "digitalFilter.h"
+#include "digitalfilter.h"
 
 /* Filter design constants */
 
