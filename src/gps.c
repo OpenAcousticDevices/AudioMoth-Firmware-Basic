@@ -32,8 +32,8 @@
 
 /* GPS fix constants */
 
-#define MINIMUM_VALID_PPS_TO_SET_TIME           8
-#define MINIMUM_VALID_RMC_TO_SET_TIME           8
+#define MINIMUM_VALID_PPS_TO_SET_TIME           4
+#define MINIMUM_VALID_RMC_TO_SET_TIME           4
 
 /* Useful time constants */
 
@@ -283,7 +283,7 @@ GPS_fixResult_t GPS_setTimeFromGPS(uint32_t timeout) {
 
                     validRMC += 1;
 
-                    if (validRMC > MINIMUM_VALID_RMC_TO_SET_TIME) {
+                    if (validRMC >= MINIMUM_VALID_RMC_TO_SET_TIME) {
 
                         uint32_t timestampInRMC;
 
@@ -295,11 +295,9 @@ GPS_fixResult_t GPS_setTimeFromGPS(uint32_t timeout) {
 
                 } else {
 
-                    validRMC = 0;
-
-                    validPPS = 0;
-
                     timeToBeSetOnNextPPS = 0;
+
+                    validRMC = 0;
 
                 }
 
@@ -319,7 +317,7 @@ GPS_fixResult_t GPS_setTimeFromGPS(uint32_t timeout) {
 
                 validPPS += 1;
 
-                if (validPPS > MINIMUM_VALID_PPS_TO_SET_TIME && timeToBeSetOnNextPPS > 0) {
+                if (validPPS >= MINIMUM_VALID_PPS_TO_SET_TIME && timeToBeSetOnNextPPS > 0) {
 
                     /* Calculate clock difference and call handler */
 
@@ -367,11 +365,7 @@ GPS_fixResult_t GPS_setTimeFromGPS(uint32_t timeout) {
 
             } else {
 
-                validRMC = 0;
-
                 validPPS = 0;
-
-                timeToBeSetOnNextPPS = 0;
 
             }
 

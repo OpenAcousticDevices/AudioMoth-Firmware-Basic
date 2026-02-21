@@ -1386,7 +1386,7 @@ static int16_t secondaryBuffer[MAXIMUM_SAMPLES_IN_DMA_TRANSFER];
 
 /* Firmware version and description */
 
-static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 11, 0};
+static uint8_t firmwareVersion[AM_FIRMWARE_VERSION_LENGTH] = {1, 11, 1};
 
 static uint8_t firmwareDescription[AM_FIRMWARE_DESCRIPTION_LENGTH] = "AudioMoth-Firmware-Basic";
 
@@ -2374,7 +2374,7 @@ int main(void) {
 
 /* Time zone handler */
 
-inline void AudioMoth_timezoneRequested(int8_t *timezoneHours, int8_t *timezoneMinutes) {
+inline void AudioMoth_timezoneRequested(int32_t *timezoneHours, int32_t *timezoneMinutes) {
 
     *timezoneHours = configSettings->timezoneHours;
 
